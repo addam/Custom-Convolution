@@ -12,6 +12,8 @@
 
 /** Defines ******************************************************************/
 
+#define CLAMPED(x,l,r) ((x<l)?l:((x>r)?r:x))
+
 #define PLUG_IN_NAME "plug_in_addam_test"
 #define PLUG_IN_BINARY "gimp-test"
 #define PLUG_IN_AUTHOR "Addam Dominec"
@@ -19,7 +21,9 @@
 
 #define GRAPH_WIDTH 200
 #define GRAPH_HEIGHT 200
+
 #define USER_POINT_COUNT 15
+#define GRAPH_HOTSPOT 3
 
 typedef struct _Curve {
 	GdkPoint points[GRAPH_WIDTH];
@@ -40,11 +44,13 @@ typedef struct PluginData {
 
 	Curve             curve_user, curve_preview, curve_fft;
 	GtkWidget        *graph;
+	int               point_grabbed; //FIXME: patří ke křivce
 	GdkPixmap        *graph_pixmap;
 } PluginData;
 
 float curve_get_value(float x, Curve *c); // interpolate the curve at an arbitrary point in range [0; 1]
-
+float dist_to_graph(float dist, float diagonal); // map pixel distance to graph x value
+int value_to_graph(float val);
 /** Plugin interface *********************************************************/
 
 static void query(void);
@@ -109,7 +115,7 @@ void fft_apply(PluginData *pd)
 	int w = pd->img_width, h = pd->img_height,
 		pw = w/2+1; // physical width
 	fftw_complex *multiplied = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (w/2+1) * h);
-	double diagonal = sqrt(h*h + w*w)/2.0;
+	float diagonal = sqrt(h*h + w*w)/2.0;
 	for(int cur_bpp=0; cur_bpp < pd->img_bpp; cur_bpp++)
 	{
 		// apply convolution
@@ -125,11 +131,8 @@ void fft_apply(PluginData *pd)
 				if (y>h/2){
 					y = y-h;
 				}
-				double dist = sqrt(x*x + y*y);
-				float point = 1.0 - (((diagonal/dist)-1.0) / (diagonal-1.0));
-				if (point < 0 || point > 1)
-					printf("%f -> %f!\n", dist, point);
-				coef = curve_get_value(point, &pd->curve_user);
+				float dist = sqrt(x*x + y*y);
+				coef = curve_get_value(dist_to_graph(dist, diagonal), &pd->curve_user);
 			}
 			multiplied[i][0] = pd->image_freq[cur_bpp][i][0] * coef;
 			multiplied[i][1] = pd->image_freq[cur_bpp][i][1] * coef;
@@ -161,30 +164,33 @@ void fft_destroy(PluginData *pd)
 
 void graph_update(PluginData *pd)
 {
-  GtkStyle *graph_style = gtk_widget_get_style (pd->graph);
+	GtkStyle *graph_style = gtk_widget_get_style (pd->graph);
 	/*  Clear the pixmap  */
 	gdk_draw_rectangle (pd->graph_pixmap, graph_style->bg_gc[GTK_STATE_NORMAL],
 											TRUE, 0, 0, GRAPH_WIDTH, GRAPH_HEIGHT);
 	
-	/*  Draw the grid lines  */
+	// Horizontal lines
+	for (int i = 0; i < 10; i++)
+	{
+		int y = value_to_graph(i/2.0);
+		gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], 0, y, GRAPH_WIDTH, y);
+	}
+	gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], 0, 0, GRAPH_WIDTH, 0);
+	// Vertical lines
 	for (int i = 0; i < 5; i++)
 	{
-		gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL],
-									 0, i * (GRAPH_HEIGHT / 4),
-									 GRAPH_WIDTH, (i*GRAPH_HEIGHT) / 4);
-		gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL],
-									 (i*GRAPH_WIDTH) / 4, 0,
-									 (i*GRAPH_WIDTH) / 4, GRAPH_HEIGHT);
+		int x = dist_to_graph(i+1, 6)*GRAPH_WIDTH;
+		gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], x, 0, x, GRAPH_HEIGHT);
 	}
-	gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL],
-								 0, GRAPH_HEIGHT - 1,
-								 GRAPH_WIDTH, GRAPH_HEIGHT - 1);
-	gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL],
-								 GRAPH_WIDTH - 1, 0,
-								 GRAPH_WIDTH - 1, GRAPH_HEIGHT);
-	gdk_draw_points (pd->graph_pixmap, graph_style->black_gc, pd->curve_user.points, GRAPH_WIDTH);
-	gdk_draw_drawable (pd->graph->window, graph_style->black_gc, pd->graph_pixmap,
-										 0, 0, 0, 0, GRAPH_WIDTH, GRAPH_HEIGHT);
+	gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], GRAPH_WIDTH-1, 0, GRAPH_WIDTH-1, GRAPH_HEIGHT);
+	// User curve
+	gdk_draw_lines (pd->graph_pixmap, graph_style->black_gc, pd->curve_user.points, GRAPH_WIDTH);
+	// User points
+	for (int i = 0; i < pd->curve_user.count; i++)
+	{
+		gdk_draw_arc(pd->graph_pixmap, graph_style->black_gc, FALSE, pd->curve_user.user_points[i].x-GRAPH_HOTSPOT-1, pd->curve_user.user_points[i].y-GRAPH_HOTSPOT-1, GRAPH_HOTSPOT*2+1, GRAPH_HOTSPOT*2+1, 0, 64*360);
+	}
+	gdk_draw_drawable (pd->graph->window, graph_style->black_gc, pd->graph_pixmap, 0, 0, 0, 0, GRAPH_WIDTH, GRAPH_HEIGHT);
 }
 
 void curve_init(Curve *c){
@@ -194,6 +200,12 @@ void curve_init(Curve *c){
 		c->points[i].y = GRAPH_HEIGHT/2;
 	}
 }
+// distance in frequency domain -> graph x
+float dist_to_graph(float dist, float diagonal){
+	float point = 1.0 - (((diagonal/dist)-1.0) / (diagonal-1.0));
+	point = point * point;
+	return point;
+}	
 // value -> graph
 int value_to_graph(float val){
 	if (val<1)
@@ -217,7 +229,7 @@ float curve_interpolate(float x, int i1, int i2, Curve *c){
 			/ (float) (c->user_points[i2].x - c->user_points[i1].x);
 }
 //get index to the first larger element
-int bisect (int item, GdkPoint *array, int count){
+int gdkpoint_bisect (int item, GdkPoint *array, int count){
 	int left = 0, right = count;
 	while (left != right){
 		int test = (left+right)/2;
@@ -233,7 +245,7 @@ float curve_get_value(float x, Curve *c){
 	if (c->count == 0)
 		return 1.0;//No curve - constant 1
 	x = x * GRAPH_WIDTH;
-	int index = bisect(x, c->user_points, c->count);
+	int index = gdkpoint_bisect(x, c->user_points, c->count);
 	// extrapolation (constant... why not)
 	if (index == c->count)
 		return graph_to_value(c->user_points[index-1].y);
@@ -242,58 +254,77 @@ float curve_get_value(float x, Curve *c){
 	else
 		return curve_interpolate(x, index-1, index, c);
 }
+void curve_update_part(int index, Curve *c){
+	if (index > 0)
+		for (int i=c->user_points[index-1].x; i<c->user_points[index].x; i++){
+			c->points[i].y = value_to_graph(curve_interpolate(i, index-1, index, c));
+		}
+	else
+		for (int i=0; i<c->user_points[index].x; i++){
+			c->points[i].y = c->user_points[index].y;
+		}
+	if (index+1 < c->count)
+		for (int i=c->user_points[index+1].x; i>=c->user_points[index].x; i--){
+			c->points[i].y = value_to_graph(curve_interpolate(i, index, index+1, c));
+		}
+	else
+		for (int i=GRAPH_WIDTH-1; i>=c->user_points[index].x; i--){
+			c->points[i].y = c->user_points[index].y;
+		}
+}
 // insert a point into the curve
-void curve_add_point(int x, int y, Curve *c){
+int curve_add_point(int x, int y, Curve *c){
 	// get neighbours' positions (if any)
 	GdkPoint point = {x, y};
-	int i, index = bisect(x, c->user_points, c->count);
+	int i, index = gdkpoint_bisect(x, c->user_points, c->count);
 	for (i=c->count; i>index; i--){
 		c->user_points[i] = c->user_points[i-1];
 	}
 	c->user_points[index] = point;
-	c->count ++;
-	// interpolate
-	if (index > 0 && index + 1 < c->count)
-		printf("Redraw between %i, %i, count:%i\n", c->user_points[index-1].x, c->user_points[index+1].x, c->count);
-	if (index > 0)
-		for (int i=c->user_points[index-1].x; i<x; i++){
-			c->points[i].y = value_to_graph(curve_interpolate(i, index-1, index, c));
-		}
-	else
-		for (int i=0; i<x; i++){
-			c->points[i].y = y;
-		}
-	if (index+1 < c->count)
-		for (int i=c->user_points[index+1].x; i>=x; i--){
-			c->points[i].y = value_to_graph(curve_interpolate(i, index, index+1, c));
-		}
-	else
-		for (int i=GRAPH_WIDTH-1; i>=x; i--){
-			c->points[i].y = y;
-		}
-	// DEBUG
-	/*for (int i=0; i<GRAPH_WIDTH; i++){
-		printf("%.3i:%.2f, ", i, curve_get_value(((float)i)/GRAPH_WIDTH, c));
-	}
-	printf("\n");*/
+	c->count += 1;
+	curve_update_part(index, c);
+	return index;
 }
-
-static gint graph_events (GtkWidget *widget, GdkEvent *event, PluginData   *pd)
+void curve_remove_point(int index, Curve *c){
+	c->count -= 1;
+	int i;
+	for (i=index; i < c->count; i++){
+		c->user_points[i] = c->user_points[i+1];
+	}
+	curve_update_part(index, c);
+}
+int curve_move_point(int index, int x, int y, Curve *c){
+	int new_index = index;
+	// fix order
+	while (new_index+1 < c->count && c->user_points[new_index+1].x < x){
+		c->user_points[new_index] = c->user_points[new_index+1];
+		new_index ++;
+	}
+	while (new_index > 0 && c->user_points[new_index-1].x > x){
+		c->user_points[new_index] = c->user_points[new_index-1];
+		new_index --;
+	}
+		
+	c->user_points[new_index].x = x;
+	c->user_points[new_index].y = y;
+	curve_update_part(index, c);
+	return new_index;
+}
+static gint graph_events (GtkWidget *widget, GdkEvent *event, PluginData *pd)
 {
   static GdkCursorType cursor_type = GDK_TOP_LEFT_ARROW;
   GdkCursorType new_type;
   GdkEventButton *bevent;
   GdkEventMotion *mevent;
-  int tx, ty;
+  int tx, ty, dist, index;
 
   new_type      = GDK_X_CURSOR;
 
   /*  get the pointer position  */
   gdk_window_get_pointer (pd->graph->window, &tx, &ty, NULL);
-
+	
 	switch (event->type){
 		case GDK_EXPOSE:
-			printf("!\n");
 			if (pd->graph_pixmap == NULL)
 				pd->graph_pixmap = gdk_pixmap_new (pd->graph->window, GRAPH_WIDTH, GRAPH_HEIGHT, -1);
 			graph_update (pd);
@@ -302,14 +333,38 @@ static gint graph_events (GtkWidget *widget, GdkEvent *event, PluginData   *pd)
 		case GDK_BUTTON_PRESS:
 			bevent = (GdkEventButton *) event;
 			new_type = GDK_TCROSS;
+			index = gdkpoint_bisect(tx, pd->curve_user.user_points, pd->curve_user.count);
+			if (index < pd->curve_user.count){
+				dist = pd->curve_user.user_points[index].x - tx;
+			}
+			if (index > 0 && tx - pd->curve_user.user_points[index-1].x < dist) {
+				index -= 1;
+				dist = tx - pd->curve_user.user_points[index].x;
+			}
+			if (dist <= GRAPH_HOTSPOT || pd->curve_user.count == USER_POINT_COUNT){
+				pd->point_grabbed = curve_move_point(index, tx, ty, &pd->curve_user);
+			}
+			else {
+				pd->point_grabbed = curve_add_point(tx, ty, &pd->curve_user);
+			}
 			
 			graph_update (pd);
 			break;
 		
 		case GDK_BUTTON_RELEASE:
 			new_type = GDK_FLEUR;
-			printf("clicked (%i, %i) -> value %f\n", tx, ty, graph_to_value(ty));
-			curve_add_point(tx, ty, &pd->curve_user);
+			if (pd->point_grabbed >= 0){
+				if (tx < 0 && pd->point_grabbed > 0) {//if point is not first, remove it
+					curve_remove_point(pd->point_grabbed, &pd->curve_user);
+				}
+				else if (tx >= GRAPH_WIDTH && pd->point_grabbed+1 < pd->curve_user.count){
+					curve_remove_point(pd->point_grabbed, &pd->curve_user);
+				}
+				else {
+					curve_move_point(pd->point_grabbed, CLAMPED(tx,0,GRAPH_WIDTH-1), CLAMPED(ty,0,GRAPH_HEIGHT-1), &pd->curve_user);
+				}
+				pd->point_grabbed = -1;
+			}
 			graph_update (pd);
 			break;
 		
@@ -321,9 +376,14 @@ static gint graph_events (GtkWidget *widget, GdkEvent *event, PluginData   *pd)
 				mevent->x = tx;
 				mevent->y = ty;
 			}
+			if (pd->point_grabbed >= 0){
+				pd->point_grabbed = curve_move_point(pd->point_grabbed, CLAMPED(tx,0,GRAPH_WIDTH-1), CLAMPED(ty,0,GRAPH_HEIGHT-1), &pd->curve_user);
+			  graph_update (pd);
+			}
 			
-			if (mevent->state & GDK_BUTTON1_MASK)
+			if (mevent->state & GDK_BUTTON1_MASK){
 				new_type = GDK_TCROSS;
+			}
 			else
 				new_type = GDK_PENCIL;
 			
@@ -360,6 +420,7 @@ gboolean dialog(PluginData *pd)
 														NULL, (GtkDialogFlags)0,
 														gimp_standard_help_func, PLUG_IN_NAME,
 														GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL,
+														GTK_STOCK_APPLY, GTK_RESPONSE_APPLY,
 														GTK_STOCK_OK,     GTK_RESPONSE_OK,
 														NULL);
 	
@@ -391,12 +452,9 @@ gboolean dialog(PluginData *pd)
 	g_signal_connect (preview_button, "clicked", G_CALLBACK (preview_clicked), pd);
 	
 	gtk_widget_show(main_hbox);
-	printf(".\n");
 	gtk_widget_show(dialog);
 	fft_prepare(pd);
-	printf("Ready.\n");
 	gboolean run = (gimp_dialog_run (GIMP_DIALOG (dialog)) == GTK_RESPONSE_OK);
-	printf(".\n");
 	fft_destroy(pd);
 	gtk_widget_destroy (dialog);
 	return run;
@@ -422,12 +480,12 @@ void query(void)
     PLUG_IN_AUTHOR,
     PLUG_IN_AUTHOR,
     PLUG_IN_VERSION,
-    "Testovací plugin",
+    "Custom Convolution...",
     "RGB*, GRAY*",
     GIMP_PLUGIN,
     G_N_ELEMENTS (args), 0,
     args, NULL);
-  gimp_plugin_menu_register (PLUG_IN_NAME, "<Image>/Filters");// /Generic
+  gimp_plugin_menu_register (PLUG_IN_NAME, "<Image>/Filters/Enhance");
   
 }
 
@@ -464,10 +522,10 @@ run (const gchar      *name,
 	gimp_drawable_mask_bounds(drawable->drawable_id, &sel_x1, &sel_y1, &sel_x2, &sel_y2);
 	pd.img_width = sel_x2 - sel_x1;
   pd.img_height = sel_y2 - sel_y1;
-  printf("width: %i height: %i\n", pd.img_width, pd.img_height);
   pd.img_offset_x = sel_x1;
   pd.img_offset_y = sel_y1;
   pd.img_bpp = gimp_drawable_bpp(drawable->drawable_id);
+  pd.point_grabbed = -1;
 
 	dialog(&pd);
 
