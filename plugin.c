@@ -46,6 +46,8 @@ typedef struct PluginData {
 	GtkWidget        *graph;
 	int               point_grabbed; //FIXME: patří ke křivce
 	GdkPixmap        *graph_pixmap;
+	
+	GtkWidget        *preview;
 } PluginData;
 
 float curve_get_value(float x, Curve *c); // interpolate the curve at an arbitrary point in range [0; 1]
@@ -91,7 +93,6 @@ void fft_prepare(PluginData *pd)
 	// execute forward FFT once
 	gimp_pixel_rgn_init (&pd->region, pd->drawable, pd->img_offset_x, pd->img_offset_y, w, h, FALSE, FALSE);
 	gimp_pixel_rgn_get_rect(&pd->region, img_pixels, pd->img_offset_x, pd->img_offset_y, w, h);
-	gimp_pixel_rgn_init (&pd->region, pd->drawable, pd->img_offset_x, pd->img_offset_y, w, h, TRUE, TRUE);
 	
 	norm = 1.0/(w*h);
 	for(cur_bpp=0; cur_bpp<img_bpp; cur_bpp++)
@@ -121,7 +122,7 @@ void fft_apply(PluginData *pd)
 		// apply convolution
 		for (int i=0; i < pw*h; i++){
 			double coef;
-			if (i==0) {//skip DC value FIXME: use a checkbox
+			if (i==0) {//skip DC value
 				coef = 1.0;
 			}
 			else {
@@ -170,7 +171,8 @@ void graph_update(PluginData *pd)
 											TRUE, 0, 0, GRAPH_WIDTH, GRAPH_HEIGHT);
 	
 	// Horizontal lines
-	for (int i = 0; i < 10; i++)
+	gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], 0, GRAPH_HEIGHT-1, GRAPH_WIDTH, GRAPH_HEIGHT-1);
+	for (int i = 1; i < 10; i++)
 	{
 		int y = value_to_graph(i/2.0);
 		gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], 0, y, GRAPH_WIDTH, y);
@@ -203,7 +205,7 @@ void curve_init(Curve *c){
 // distance in frequency domain -> graph x
 float dist_to_graph(float dist, float diagonal){
 	float point = 1.0 - (((diagonal/dist)-1.0) / (diagonal-1.0));
-	point = point * point;
+	point = point * point * point;
 	return point;
 }	
 // value -> graph
@@ -318,7 +320,7 @@ static gint graph_events (GtkWidget *widget, GdkEvent *event, PluginData *pd)
   GdkEventMotion *mevent;
   int tx, ty, dist, index;
 
-  new_type      = GDK_X_CURSOR;
+  new_type = GDK_X_CURSOR;
 
   /*  get the pointer position  */
   gdk_window_get_pointer (pd->graph->window, &tx, &ty, NULL);
@@ -366,6 +368,7 @@ static gint graph_events (GtkWidget *widget, GdkEvent *event, PluginData *pd)
 				pd->point_grabbed = -1;
 			}
 			graph_update (pd);
+			gimp_preview_invalidate(GIMP_PREVIEW(pd->preview));
 			break;
 		
 		case GDK_MOTION_NOTIFY:
@@ -400,18 +403,21 @@ static gint graph_events (GtkWidget *widget, GdkEvent *event, PluginData *pd)
 	return FALSE;
 }
 
-gint preview_clicked(GtkWidget *widget, PluginData   *pd)
+gint preview_clicked(GtkWidget *widget, PluginData *pd)
 {
+	int x, y, w, h;
+	gimp_preview_get_position (GIMP_PREVIEW(pd->preview), &x, &y);
+	gimp_preview_get_size (GIMP_PREVIEW(pd->preview), &w, &h);
+	gimp_pixel_rgn_init (&pd->region, pd->drawable, pd->img_offset_x, pd->img_offset_y, pd->img_width, pd->img_height, FALSE, TRUE);
 	fft_apply(pd);
 	
-	// show the result
 	gimp_pixel_rgn_set_rect(&pd->region, pd->img_pixels, pd->img_offset_x, pd->img_offset_y, pd->img_width, pd->img_height);
-	gimp_drawable_flush(pd->drawable);
-	gimp_drawable_merge_shadow(pd->drawable->drawable_id, TRUE);
-	gimp_drawable_update (pd->drawable->drawable_id, pd->img_offset_x, pd->img_offset_y, pd->img_width, pd->img_height);
-	gimp_displays_flush();
+	gimp_drawable_preview_draw_region(GIMP_DRAWABLE_PREVIEW(pd->preview), &pd->region);
+	return FALSE;
 }
-
+gint preview_invalidated(PluginData *pd, GtkWidget *preview){
+	return preview_clicked(preview, pd);
+}
 gboolean dialog(PluginData *pd)
 {
 	gimp_ui_init (PLUG_IN_BINARY, FALSE);
@@ -420,7 +426,7 @@ gboolean dialog(PluginData *pd)
 														NULL, (GtkDialogFlags)0,
 														gimp_standard_help_func, PLUG_IN_NAME,
 														GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL,
-														GTK_STOCK_APPLY, GTK_RESPONSE_APPLY,
+														/*GTK_STOCK_APPLY, GTK_RESPONSE_APPLY,*/
 														GTK_STOCK_OK,     GTK_RESPONSE_OK,
 														NULL);
 	
@@ -429,6 +435,12 @@ gboolean dialog(PluginData *pd)
 	gtk_container_add (GTK_CONTAINER(GTK_DIALOG(dialog)->vbox), main_hbox);
 	
 	curve_init(&pd->curve_user);
+	
+  pd->preview = gimp_drawable_preview_new (pd->drawable, 0);
+  gtk_box_pack_start (GTK_BOX (main_hbox), pd->preview, TRUE, TRUE, 0);
+  gtk_widget_show (pd->preview);
+ 
+  g_signal_connect_swapped (pd->preview, "invalidated", G_CALLBACK (preview_invalidated), pd);
 	
 	graph = pd->graph = gtk_drawing_area_new();
 	pd->graph_pixmap = NULL;
@@ -455,6 +467,16 @@ gboolean dialog(PluginData *pd)
 	gtk_widget_show(dialog);
 	fft_prepare(pd);
 	gboolean run = (gimp_dialog_run (GIMP_DIALOG (dialog)) == GTK_RESPONSE_OK);
+	if (run) {
+		gimp_pixel_rgn_init (&pd->region, pd->drawable, pd->img_offset_x, pd->img_offset_y, pd->img_width, pd->img_height, TRUE, TRUE);
+		fft_apply(pd);
+		// show the result
+		gimp_pixel_rgn_set_rect(&pd->region, pd->img_pixels, pd->img_offset_x, pd->img_offset_y, pd->img_width, pd->img_height);
+		gimp_drawable_flush(pd->drawable);
+		gimp_drawable_merge_shadow(pd->drawable->drawable_id, TRUE);
+		gimp_drawable_update (pd->drawable->drawable_id, pd->img_offset_x, pd->img_offset_y, pd->img_width, pd->img_height);
+		gimp_displays_flush();
+	}
 	fft_destroy(pd);
 	gtk_widget_destroy (dialog);
 	return run;
@@ -480,7 +502,7 @@ void query(void)
     PLUG_IN_AUTHOR,
     PLUG_IN_AUTHOR,
     PLUG_IN_VERSION,
-    "Custom Convolution...",
+    "Frequency Curves...",
     "RGB*, GRAY*",
     GIMP_PLUGIN,
     G_N_ELEMENTS (args), 0,
