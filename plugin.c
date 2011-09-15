@@ -19,10 +19,12 @@
 
 #define GRAPH_WIDTH 200
 #define GRAPH_HEIGHT 200
+#define USER_POINT_COUNT 15
 
 typedef struct _Curve {
 	GdkPoint points[GRAPH_WIDTH];
-	guchar x[10], y[10], count;
+	GdkPoint user_points[USER_POINT_COUNT];
+	guchar count;
 } Curve;
 
 typedef struct PluginData {
@@ -107,22 +109,30 @@ void fft_apply(PluginData *pd)
 	int w = pd->img_width, h = pd->img_height,
 		pw = w/2+1; // physical width
 	fftw_complex *multiplied = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (w/2+1) * h);
-	double coef_norm = (h*w) * 24.0 / (h*h*h + w*w*w);
+	double diagonal = sqrt(h*h + w*w)/2.0;
 	for(int cur_bpp=0; cur_bpp < pd->img_bpp; cur_bpp++)
 	{
 		// apply convolution
 		for (int i=0; i < pw*h; i++){
-			int x, y;
-			x = i % pw;
-			y = i / pw;
-			if (y>h/2){
-				y = y-h;
+			double coef;
+			if (i==0) {//skip DC value FIXME: use a checkbox
+				coef = 1.0;
 			}
-			float xnorm = ((float)x)/w, ynorm = ((float)y)/h;
-			double coef = curve_get_value((xnorm*xnorm + ynorm*ynorm)/2.0, &pd->curve_user);//(x*x + y*y) * coef_norm; //1.0-(x+(y>0?y:-y))/100.0
-			//double coef = ((y>-2 && y<50))? 1.0: 0; //(x > -y-20 && -y > x-20) || (x < 50) || 
-			multiplied[i][0] = pd->image_freq[cur_bpp][i][0]*coef;
-			multiplied[i][1] = pd->image_freq[cur_bpp][i][1]*coef;
+			else {
+				int x, y;
+				x = i % pw;
+				y = i / pw;
+				if (y>h/2){
+					y = y-h;
+				}
+				double dist = sqrt(x*x + y*y);
+				float point = 1.0 - (((diagonal/dist)-1.0) / (diagonal-1.0));
+				if (point < 0 || point > 1)
+					printf("%f -> %f!\n", dist, point);
+				coef = curve_get_value(point, &pd->curve_user);
+			}
+			multiplied[i][0] = pd->image_freq[cur_bpp][i][0] * coef;
+			multiplied[i][1] = pd->image_freq[cur_bpp][i][1] * coef;
 		}
 		// apply inverse FFT
 		fftw_execute_dft_c2r(pd->plan, multiplied, pd->image[cur_bpp]);
@@ -181,79 +191,91 @@ void curve_init(Curve *c){
 	c->count = 0;
 	for (int i=0; i<GRAPH_WIDTH; i++){
 		c->points[i].x = i;
-		c->points[i].y = 10;
+		c->points[i].y = GRAPH_HEIGHT/2;
 	}
 }
-
-// interpolate the curve at a given point between two points with indices i1, i2
+// value -> graph
+int value_to_graph(float val){
+	if (val<1)
+		return GRAPH_HEIGHT*(1.0-val/2);
+	else
+		return GRAPH_HEIGHT/(2*val);
+}
+// graph -> value
+float graph_to_value(int y){
+	if (y > GRAPH_HEIGHT/2)
+		return ((float)GRAPH_HEIGHT - y) / (GRAPH_HEIGHT/2.0);
+	else if (y>0)
+		return (GRAPH_HEIGHT/2.0) / (float) y;
+	else
+		return GRAPH_HEIGHT/2.0;
+}
+// interpolate the curve at a given point between two points with indices i1, i2 (unnormalized)
 float curve_interpolate(float x, int i1, int i2, Curve *c){
 	// linear interpolation
-	return ((x - c->x[i1]) * c->y[i2] + (c->x[i2] - x) * c->y[i1]) / (float) (c->x[i2] - c->x[i1]);
+	return ((x - c->user_points[i1].x) * graph_to_value(c->user_points[i2].y) + (c->user_points[i2].x - x) * graph_to_value(c->user_points[i1].y))
+			/ (float) (c->user_points[i2].x - c->user_points[i1].x);
 }
-
+//get index to the first larger element
+int bisect (int item, GdkPoint *array, int count){
+	int left = 0, right = count;
+	while (left != right){
+		int test = (left+right)/2;
+		if (array[test].x > item)
+			right = test;
+		else
+			left = test+1;
+	}
+	return left;
+}
 // interpolate the curve at an arbitrary point in range [0; 1]
 float curve_get_value(float x, Curve *c){
-	x = x * GRAPH_WIDTH;
-	if (!c->count)
+	if (c->count == 0)
 		return 1.0;//No curve - constant 1
-	int left = -1, right = -1;
-	for (int i=0; i < c->count; i++)
-	{
-		// direct hit
-		if (c->x[i] == x)
-			return (float) c->y[i];
-		// otherwise, move the boundaries
-		if ((left == -1 || c->x[i] > c->x[left]) && c->x[i] < x) 
-			left = i;
-		if ((right == -1 || c->x[i] < c->x[right]) && c->x[i] > x)
-			right = i;
-	}
+	x = x * GRAPH_WIDTH;
+	int index = bisect(x, c->user_points, c->count);
 	// extrapolation (constant... why not)
-	if (left == right)
-		return (float) c->y[left] / GRAPH_HEIGHT;
+	if (index == c->count)
+		return graph_to_value(c->user_points[index-1].y);
+	else if (index == 0)
+		return graph_to_value(c->user_points[index].y);
 	else
-		return curve_interpolate(x, left, right, c) / GRAPH_HEIGHT;
+		return curve_interpolate(x, index-1, index, c);
 }
-
 // insert a point into the curve
 void curve_add_point(int x, int y, Curve *c){
 	// get neighbours' positions (if any)
-	int left = -1, right = -1;
-	for (int i=0; i < c->count; i++)
-	{
-		if ((left == -1 || c->x[i] > c->x[left]) && c->x[i] < x) 
-			left = i;
-		if ((right == -1 || c->x[i] < c->x[right]) && c->x[i] > x)
-			right = i;
+	GdkPoint point = {x, y};
+	int i, index = bisect(x, c->user_points, c->count);
+	for (i=c->count; i>index; i--){
+		c->user_points[i] = c->user_points[i-1];
 	}
-	// insert into array
-	c->x[c->count] = x;
-	c->y[c->count] = y;
+	c->user_points[index] = point;
 	c->count ++;
 	// interpolate
-	if (left>0 && right>0)
-		printf("Redraw between %i, %i, count:%i\n", c->x[left], c->x[right], c->count);
-	if (left >= 0)
-		for (int i=c->x[left]; i<x; i++){
-			c->points[i].y = GRAPH_HEIGHT - (int) curve_interpolate(i, left, c->count-1, c);
+	if (index > 0 && index + 1 < c->count)
+		printf("Redraw between %i, %i, count:%i\n", c->user_points[index-1].x, c->user_points[index+1].x, c->count);
+	if (index > 0)
+		for (int i=c->user_points[index-1].x; i<x; i++){
+			c->points[i].y = value_to_graph(curve_interpolate(i, index-1, index, c));
 		}
 	else
 		for (int i=0; i<x; i++){
 			c->points[i].y = y;
 		}
-	if (right >= 0)
-		for (int i=c->x[right]; i>=x; i--){
-			c->points[i].y = GRAPH_HEIGHT - (int) curve_interpolate(i, c->count-1, right, c);
+	if (index+1 < c->count)
+		for (int i=c->user_points[index+1].x; i>=x; i--){
+			c->points[i].y = value_to_graph(curve_interpolate(i, index, index+1, c));
 		}
 	else
 		for (int i=GRAPH_WIDTH-1; i>=x; i--){
 			c->points[i].y = y;
 		}
 	// DEBUG
-	for (int i=0; i<GRAPH_WIDTH; i++){
+	/*for (int i=0; i<GRAPH_WIDTH; i++){
 		printf("%.3i:%.2f, ", i, curve_get_value(((float)i)/GRAPH_WIDTH, c));
 	}
-	printf("\n");
+	printf("\n");*/
 }
 
 static gint graph_events (GtkWidget *widget, GdkEvent *event, PluginData   *pd)
@@ -286,8 +308,8 @@ static gint graph_events (GtkWidget *widget, GdkEvent *event, PluginData   *pd)
 		
 		case GDK_BUTTON_RELEASE:
 			new_type = GDK_FLEUR;
-			printf("%i %i\n", tx, GRAPH_HEIGHT - ty);
-			curve_add_point(tx, GRAPH_HEIGHT - ty, &pd->curve_user);
+			printf("clicked (%i, %i) -> value %f\n", tx, ty, graph_to_value(ty));
+			curve_add_point(tx, ty, &pd->curve_user);
 			graph_update (pd);
 			break;
 		
