@@ -19,6 +19,7 @@
 #define PLUG_IN_AUTHOR "Addam Dominec"
 #define PLUG_IN_VERSION "Aug 2011, 0.4.1"
 
+#define WAVELET_DEPTH 8
 #define GRAPH_WIDTH 200
 #define GRAPH_HEIGHT 200
 
@@ -38,7 +39,8 @@ typedef struct PluginData {
 	gint              img_width, img_height, img_offset_x, img_offset_y;
 	gint              img_bpp;
 	fftw_complex    **image_freq; // array of pointers to image for each channel, frequency domain
-	double          **image;  // same as above, image domain
+	short            *image_wavelet; // an array of wavelet images: y->x->scale
+	double          **image;  // same as above, image domain (fixme: remove?)
 	guchar           *img_pixels; // array used for acquiring data from the drawable
 	fftw_plan         plan;
 
@@ -74,7 +76,7 @@ void fft_prepare(PluginData *pd)
 	gint         w = pd->img_width, h = pd->img_height;
 	gint         img_bpp = pd->img_bpp, cur_bpp;
 	int          x, y;
-	double     **image = pd->image;
+	double     **image;
 	guchar      *img_pixels;
 	double       norm;
 	image = pd->image = (double**) malloc(sizeof(double*) * img_bpp);
@@ -115,7 +117,7 @@ void fft_apply(PluginData *pd)
 {
 	int w = pd->img_width, h = pd->img_height,
 		pw = w/2+1; // physical width
-	fftw_complex *multiplied = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (w/2+1) * h);
+	fftw_complex *multiplied = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * pw * h);
 	float diagonal = sqrt(h*h + w*w)/2.0;
 	for(int cur_bpp=0; cur_bpp < pd->img_bpp; cur_bpp++)
 	{
@@ -146,7 +148,7 @@ void fft_apply(PluginData *pd)
 			for(int y=0; y < h; y ++)
 			{
 				double v = pd->image[cur_bpp][y*w + x];
-				pd->img_pixels[(y*w + x) * pd->img_bpp+cur_bpp] = (v>255)?255:((v<0)?0:v);
+				pd->img_pixels[(y*w + x) * pd->img_bpp+cur_bpp] = CLAMPED(v,0,255);
 			}
 		}
 	}
@@ -162,7 +164,108 @@ void fft_destroy(PluginData *pd)
 	free(pd->image);
 	free(pd->image_freq);
 }
-
+int scale_to_dist(int scale, int diagonal){
+	float point = 1.0/(1<<(WAVELET_DEPTH-scale-1));
+	return diagonal*(point*point*point);
+}
+void wavelet_prepare(PluginData *pd){
+	int w = pd->img_width, h = pd->img_height,
+		pw = w/2+1; // physical width
+	fftw_complex *multiplied = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * pw * h);
+	double *image_temp = (double*)fftw_malloc(sizeof(double) * w * h);
+	int diagonal = (h*h + w*w)/4;
+	pd->image_wavelet = (short*)fftw_malloc(WAVELET_DEPTH * w * h * sizeof(short));
+	
+	printf("Diagonal: %i\n", diagonal);
+	int lower = 0, peak = 0, upper = scale_to_dist(1, diagonal);
+	for (int scale = 0; scale < WAVELET_DEPTH; scale ++)
+	{
+		printf("Scale %i: L %i, P %i, U %i, (%f/%f), graph: %i\n", scale, lower, peak, upper, sqrt(peak), sqrt(diagonal), (int)(dist_to_graph(scale_to_dist(scale, diagonal), diagonal)*GRAPH_WIDTH));
+		if (peak)
+			printf("scale %i to dist %i to graph %f ^2 = %i\n", scale, peak, 1.0 - (((diagonal/peak)-1.0) / (diagonal-1.0)), (int)(dist_to_graph(peak, diagonal)*GRAPH_WIDTH));
+		double above = upper-peak, below = peak-lower;
+		for (int i=0; i < pw*h; i++){
+			multiplied[i][0] = multiplied[i][1] = 0.0;
+		}
+		for (int i=0; i < pw*h; i++){
+			int x, y;
+			x = i % pw;
+			y = i / pw;
+			if (y>h/2){
+				y = y-h;
+			}
+			int dist = x*x + y*y;
+			if (dist < upper){
+				if (dist >= lower){
+					if (dist >= peak){
+						for(int cur_bpp=0; cur_bpp < pd->img_bpp; cur_bpp ++)
+						{
+							multiplied[i][0] += pd->image_freq[cur_bpp][i][0];
+							multiplied[i][1] += pd->image_freq[cur_bpp][i][1];
+						}
+						double coef = (1.0 - (dist-peak)/(above)) / pd->img_bpp;
+						multiplied[i][0] *= coef;
+						multiplied[i][1] *= coef;
+					}
+					else {
+						for(int cur_bpp=0; cur_bpp < pd->img_bpp; cur_bpp ++)
+						{
+							multiplied[i][0] += pd->image_freq[cur_bpp][i][0];// - multiplied[i][0];
+							multiplied[i][1] += pd->image_freq[cur_bpp][i][1];// - multiplied[i][1];
+						}
+						double coef = (1.0 - (peak-dist)/below) / pd->img_bpp;
+						multiplied[i][0] *= coef;
+						multiplied[i][1] *= coef;
+					}
+				}
+				else {
+					multiplied[i][0] = multiplied[i][1] = 0.0;
+				}
+			}
+			else {
+				multiplied[i][0] = multiplied[i][1] = 0.0;
+			}
+		}
+		// apply inverse FFT
+		fftw_execute_dft_c2r(pd->plan, multiplied, image_temp);
+		for (int i=0; i < w*h; i++){
+			pd->image_wavelet[i*WAVELET_DEPTH + scale] = image_temp[i];//CLAMPED(image_temp[i], -128, 127);
+		}
+		lower = peak;
+		peak = upper;
+		upper = scale_to_dist(scale+2, diagonal);
+	}
+	fftw_free(multiplied);
+	fftw_free(image_temp);
+}
+void wavelet_apply(PluginData *pd, int out_x, int out_y, int out_w, int out_h){
+	int w = pd->img_width, h = pd->img_height;
+	float coef[WAVELET_DEPTH];
+	float diagonal = (h*h + w*w)/4;
+	for (int scale=0; scale<WAVELET_DEPTH; scale++)
+	{
+		coef[scale] = curve_get_value(dist_to_graph(scale_to_dist(scale, diagonal), diagonal), &pd->curve_user);
+	}
+	for (int y=0; y<out_h; y++)
+	{
+		for (int x=0; x<out_w; x++)
+		{
+			short *pixel_wavelets = pd->image_wavelet + WAVELET_DEPTH*((y+out_y)*w +(x+out_x));
+			float v = 0;
+			for (int scale=0; scale<WAVELET_DEPTH; scale ++)
+			{
+				v += pixel_wavelets[scale] * coef[scale];
+			}
+			for (int cur_bpp=0; cur_bpp < pd->img_bpp; cur_bpp ++)
+			{
+				pd->img_pixels[(y*out_w+x)*pd->img_bpp + cur_bpp] = CLAMPED(v,0,255);
+			}
+		}
+	}
+}
+void wavelet_destroy(PluginData *pd){
+	fftw_free(pd->image_wavelet);
+}
 void graph_update(PluginData *pd)
 {
 	GtkStyle *graph_style = gtk_widget_get_style (pd->graph);
@@ -185,6 +288,13 @@ void graph_update(PluginData *pd)
 		gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], x, 0, x, GRAPH_HEIGHT);
 	}
 	gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], GRAPH_WIDTH-1, 0, GRAPH_WIDTH-1, GRAPH_HEIGHT);
+	// Wavelet marks
+	float diagonal = (pd->img_width*pd->img_width + pd->img_height*pd->img_height)/4;
+	for (int i = 0; i < WAVELET_DEPTH; i++)
+	{
+		int x = dist_to_graph(scale_to_dist(i, diagonal), diagonal)*GRAPH_WIDTH;
+		gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], x, GRAPH_HEIGHT/2 - 2, x, GRAPH_HEIGHT/2 + 2);
+	}
 	// User curve
 	gdk_draw_lines (pd->graph_pixmap, graph_style->black_gc, pd->curve_user.points, GRAPH_WIDTH);
 	// User points
@@ -205,7 +315,7 @@ void curve_init(Curve *c){
 // distance in frequency domain -> graph x
 float dist_to_graph(float dist, float diagonal){
 	float point = 1.0 - (((diagonal/dist)-1.0) / (diagonal-1.0));
-	point = point * point * point;
+	point = point * point;
 	return point;
 }	
 // value -> graph
@@ -382,6 +492,7 @@ static gint graph_events (GtkWidget *widget, GdkEvent *event, PluginData *pd)
 			if (pd->point_grabbed >= 0){
 				pd->point_grabbed = curve_move_point(pd->point_grabbed, CLAMPED(tx,0,GRAPH_WIDTH-1), CLAMPED(ty,0,GRAPH_HEIGHT-1), &pd->curve_user);
 			  graph_update (pd);
+				gimp_preview_invalidate(GIMP_PREVIEW(pd->preview));
 			}
 			
 			if (mevent->state & GDK_BUTTON1_MASK){
@@ -409,9 +520,10 @@ gint preview_clicked(GtkWidget *widget, PluginData *pd)
 	gimp_preview_get_position (GIMP_PREVIEW(pd->preview), &x, &y);
 	gimp_preview_get_size (GIMP_PREVIEW(pd->preview), &w, &h);
 	gimp_pixel_rgn_init (&pd->region, pd->drawable, pd->img_offset_x, pd->img_offset_y, pd->img_width, pd->img_height, FALSE, TRUE);
-	fft_apply(pd);
+	//fft_apply(pd);
+	wavelet_apply(pd, x, y, w, h);
 	
-	gimp_pixel_rgn_set_rect(&pd->region, pd->img_pixels, pd->img_offset_x, pd->img_offset_y, pd->img_width, pd->img_height);
+	gimp_pixel_rgn_set_rect(&pd->region, pd->img_pixels, x, y, w, h);
 	gimp_drawable_preview_draw_region(GIMP_DRAWABLE_PREVIEW(pd->preview), &pd->region);
 	return FALSE;
 }
@@ -466,6 +578,7 @@ gboolean dialog(PluginData *pd)
 	gtk_widget_show(main_hbox);
 	gtk_widget_show(dialog);
 	fft_prepare(pd);
+	wavelet_prepare(pd);
 	gboolean run = (gimp_dialog_run (GIMP_DIALOG (dialog)) == GTK_RESPONSE_OK);
 	if (run) {
 		gimp_pixel_rgn_init (&pd->region, pd->drawable, pd->img_offset_x, pd->img_offset_y, pd->img_width, pd->img_height, TRUE, TRUE);
