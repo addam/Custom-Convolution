@@ -2,8 +2,8 @@
 GIMPTOOL=gimptool-2.0
 PLUGIN_INSTALL=$(GIMPTOOL) --install-bin
 GCC=g++
-LIBS=$(shell pkg-config fftw3 gimp-2.0 gimpui-2.0 gtk+-2.0 --libs)
-CFLAGS=-O2 -g $(shell pkg-config fftw3 gimp-2.0 gimpui-2.0 gtk+-2.0 --cflags)
+LIBS=$(shell pkg-config fftw3f gimp-2.0 gimpui-2.0 gtk+-2.0 --libs)
+CFLAGS=-O2 -g $(shell pkg-config fftw3f gimp-2.0 gimpui-2.0 gtk+-2.0 --cflags)
 
 all: gimp-test
 

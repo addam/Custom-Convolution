@@ -38,11 +38,11 @@ typedef struct PluginData {
 
 	gint              img_width, img_height, img_offset_x, img_offset_y;
 	gint              img_bpp;
-	fftw_complex    **image_freq; // array of pointers to image for each channel, frequency domain
+	fftwf_complex    **image_freq; // array of pointers to image for each channel, frequency domain
 	short            *image_wavelet; // an array of wavelet images: y->x->scale
-	double          **image;  // same as above, image domain (fixme: remove?)
+	float          **image;  // same as above, image domain (fixme: remove?)
 	guchar           *img_pixels; // array used for acquiring data from the drawable
-	fftw_plan         plan;
+	fftwf_plan         plan;
 
 	Curve             curve_user, curve_preview, curve_fft;
 	GtkWidget        *graph;
@@ -76,21 +76,23 @@ void fft_prepare(PluginData *pd)
 	gint         w = pd->img_width, h = pd->img_height;
 	gint         img_bpp = pd->img_bpp, cur_bpp;
 	int          x, y;
-	double     **image;
+	float     **image;
 	guchar      *img_pixels;
-	double       norm;
-	image = pd->image = (double**) malloc(sizeof(double*) * img_bpp);
-	pd->image_freq = (fftw_complex**) malloc(sizeof(fftw_complex*) * img_bpp);
+	float       norm;
+	image = pd->image = (float**) malloc(sizeof(float*) * img_bpp);
+	pd->image_freq = (fftwf_complex**) malloc(sizeof(fftwf_complex*) * img_bpp);
   img_pixels = pd->img_pixels = g_new (guchar, w * h * img_bpp);
   //allocate an array for each channel
   for (cur_bpp=0; cur_bpp<img_bpp; cur_bpp ++){
-	  image[cur_bpp] = (double*) fftw_malloc(sizeof(double) * w * h);
-		pd->image_freq[cur_bpp] = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * (w/2+1) * h);
+	  image[cur_bpp] = (float*) fftwf_malloc(sizeof(float) * w * h);
+		pd->image_freq[cur_bpp] = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * (w/2+1) * h);
 	}
+	printf("Image data occupies %lu bytes.\n", sizeof(float) * w * h * img_bpp);
+	printf("Frequency data occupies %lu bytes.\n", sizeof(fftwf_complex) * (w/2+1) * h * img_bpp);
 	// forward plan
-	fftw_plan plan = fftw_plan_dft_r2c_2d(pd->img_height, pd->img_width, *image, *pd->image_freq, FFTW_ESTIMATE);
+	fftwf_plan plan = fftwf_plan_dft_r2c_2d(pd->img_height, pd->img_width, *image, *pd->image_freq, FFTW_ESTIMATE);
 	// inverse plan (to be reused)
-	pd->plan = fftw_plan_dft_c2r_2d(pd->img_height, pd->img_width, *pd->image_freq, *image, FFTW_ESTIMATE);
+	pd->plan = fftwf_plan_dft_c2r_2d(pd->img_height, pd->img_width, *pd->image_freq, *image, FFTW_ESTIMATE);
 
 	// execute forward FFT once
 	gimp_pixel_rgn_init (&pd->region, pd->drawable, pd->img_offset_x, pd->img_offset_y, w, h, FALSE, FALSE);
@@ -99,31 +101,31 @@ void fft_prepare(PluginData *pd)
 	norm = 1.0/(w*h);
 	for(cur_bpp=0; cur_bpp<img_bpp; cur_bpp++)
 	{
-		// convert one colour channel to double[]
+		// convert one colour channel to float[]
 		for(x=0; x < w; x ++)
 		{
 			for(y=0; y < h; y ++)
 			{
-				 image[cur_bpp][y*w + x] = norm * (double) img_pixels[(y*w + x)*img_bpp + cur_bpp];
+				 image[cur_bpp][y*w + x] = norm * (float) img_pixels[(y*w + x)*img_bpp + cur_bpp];
 			}
 		}
 		// transform the channel
-		fftw_execute_dft_r2c(plan, image[cur_bpp], pd->image_freq[cur_bpp]);
+		fftwf_execute_dft_r2c(plan, image[cur_bpp], pd->image_freq[cur_bpp]);
 	}
-	fftw_destroy_plan(plan);
+	fftwf_destroy_plan(plan);
 }
 
 void fft_apply(PluginData *pd)
 {
 	int w = pd->img_width, h = pd->img_height,
 		pw = w/2+1; // physical width
-	fftw_complex *multiplied = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * pw * h);
+	fftwf_complex *multiplied = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * pw * h);
 	float diagonal = sqrt(h*h + w*w)/2.0;
 	for(int cur_bpp=0; cur_bpp < pd->img_bpp; cur_bpp++)
 	{
 		// apply convolution
 		for (int i=0; i < pw*h; i++){
-			double coef;
+			float coef;
 			if (i==0) {//skip DC value
 				coef = 1.0;
 			}
@@ -141,25 +143,25 @@ void fft_apply(PluginData *pd)
 			multiplied[i][1] = pd->image_freq[cur_bpp][i][1] * coef;
 		}
 		// apply inverse FFT
-		fftw_execute_dft_c2r(pd->plan, multiplied, pd->image[cur_bpp]);
+		fftwf_execute_dft_c2r(pd->plan, multiplied, pd->image[cur_bpp]);
 		// pack results for GIMP
 		for(int x=0; x < w; x ++)
 		{
 			for(int y=0; y < h; y ++)
 			{
-				double v = pd->image[cur_bpp][y*w + x];
+				float v = pd->image[cur_bpp][y*w + x];
 				pd->img_pixels[(y*w + x) * pd->img_bpp+cur_bpp] = CLAMPED(v,0,255);
 			}
 		}
 	}
-	fftw_free(multiplied);
+	fftwf_free(multiplied);
 }
 void fft_destroy(PluginData *pd)
 {
-	fftw_destroy_plan(pd->plan);
+	fftwf_destroy_plan(pd->plan);
 	for (int i=0; i<pd->img_bpp; i++){
-		fftw_free(pd->image[i]);
-		fftw_free(pd->image_freq[i]);
+		fftwf_free(pd->image[i]);
+		fftwf_free(pd->image_freq[i]);
 	}
 	free(pd->image);
 	free(pd->image_freq);
@@ -171,10 +173,11 @@ int scale_to_dist(int scale, int diagonal){
 void wavelet_prepare(PluginData *pd){
 	int w = pd->img_width, h = pd->img_height,
 		pw = w/2+1; // physical width
-	fftw_complex *multiplied = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * pw * h);
-	double *image_temp = (double*)fftw_malloc(sizeof(double) * w * h);
+	fftwf_complex *multiplied = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * pw * h);
+	float *image_temp = (float*)fftwf_malloc(sizeof(float) * w * h);
 	int diagonal = (h*h + w*w)/4;
-	pd->image_wavelet = (short*)fftw_malloc(WAVELET_DEPTH * w * h * sizeof(short));
+	printf("Wavelet layers occupy %lu bytes.\n", WAVELET_DEPTH * w * h * sizeof(short));
+	pd->image_wavelet = (short*)fftwf_malloc(WAVELET_DEPTH * w * h * sizeof(short));
 	
 	printf("Diagonal: %i\n", diagonal);
 	int lower = 0, peak = 0, upper = scale_to_dist(1, diagonal);
@@ -183,7 +186,7 @@ void wavelet_prepare(PluginData *pd){
 		printf("Scale %i: L %i, P %i, U %i, (%f/%f), graph: %i\n", scale, lower, peak, upper, sqrt(peak), sqrt(diagonal), (int)(dist_to_graph(scale_to_dist(scale, diagonal), diagonal)*GRAPH_WIDTH));
 		if (peak)
 			printf("scale %i to dist %i to graph %f ^2 = %i\n", scale, peak, 1.0 - (((diagonal/peak)-1.0) / (diagonal-1.0)), (int)(dist_to_graph(peak, diagonal)*GRAPH_WIDTH));
-		double above = upper-peak, below = peak-lower;
+		float above = upper-peak, below = peak-lower;
 		for (int i=0; i < pw*h; i++){
 			multiplied[i][0] = multiplied[i][1] = 0.0;
 		}
@@ -203,7 +206,7 @@ void wavelet_prepare(PluginData *pd){
 							multiplied[i][0] += pd->image_freq[cur_bpp][i][0];
 							multiplied[i][1] += pd->image_freq[cur_bpp][i][1];
 						}
-						double coef = (1.0 - (dist-peak)/(above)) / pd->img_bpp;
+						float coef = (1.0 - (dist-peak)/(above)) / pd->img_bpp;
 						multiplied[i][0] *= coef;
 						multiplied[i][1] *= coef;
 					}
@@ -213,7 +216,7 @@ void wavelet_prepare(PluginData *pd){
 							multiplied[i][0] += pd->image_freq[cur_bpp][i][0];// - multiplied[i][0];
 							multiplied[i][1] += pd->image_freq[cur_bpp][i][1];// - multiplied[i][1];
 						}
-						double coef = (1.0 - (peak-dist)/below) / pd->img_bpp;
+						float coef = (1.0 - (peak-dist)/below) / pd->img_bpp;
 						multiplied[i][0] *= coef;
 						multiplied[i][1] *= coef;
 					}
@@ -227,7 +230,7 @@ void wavelet_prepare(PluginData *pd){
 			}
 		}
 		// apply inverse FFT
-		fftw_execute_dft_c2r(pd->plan, multiplied, image_temp);
+		fftwf_execute_dft_c2r(pd->plan, multiplied, image_temp);
 		for (int i=0; i < w*h; i++){
 			pd->image_wavelet[i*WAVELET_DEPTH + scale] = image_temp[i];//CLAMPED(image_temp[i], -128, 127);
 		}
@@ -235,8 +238,8 @@ void wavelet_prepare(PluginData *pd){
 		peak = upper;
 		upper = scale_to_dist(scale+2, diagonal);
 	}
-	fftw_free(multiplied);
-	fftw_free(image_temp);
+	fftwf_free(multiplied);
+	fftwf_free(image_temp);
 }
 void wavelet_apply(PluginData *pd, int out_x, int out_y, int out_w, int out_h){
 	int w = pd->img_width, h = pd->img_height;
@@ -264,7 +267,7 @@ void wavelet_apply(PluginData *pd, int out_x, int out_y, int out_w, int out_h){
 	}
 }
 void wavelet_destroy(PluginData *pd){
-	fftw_free(pd->image_wavelet);
+	fftwf_free(pd->image_wavelet);
 }
 void graph_update(PluginData *pd)
 {
