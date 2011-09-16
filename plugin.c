@@ -39,12 +39,12 @@ typedef struct PluginData {
 	gint              img_width, img_height, img_offset_x, img_offset_y;
 	gint              img_bpp;
 	fftwf_complex    **image_freq; // array of pointers to image for each channel, frequency domain
-	short            *image_wavelet; // an array of wavelet images: y->x->scale
-	float          **image;  // same as above, image domain (fixme: remove?)
-	guchar           *img_pixels; // array used for acquiring data from the drawable
+	short             *image_wavelet; // an array of wavelet images: y->x->scale
+	float            **image;  // same as above, image domain (fixme: remove?)
+	guchar            *img_pixels; // array used for acquiring data from the drawable
 	fftwf_plan         plan;
 
-	Curve             curve_user, curve_preview, curve_fft;
+	Curve             curve_user, curve_fft;
 	GtkWidget        *graph;
 	int               point_grabbed; //FIXME: patří ke křivce
 	GdkPixmap        *graph_pixmap;
@@ -180,7 +180,7 @@ void wavelet_prepare(PluginData *pd){
 	pd->image_wavelet = (short*)fftwf_malloc(WAVELET_DEPTH * w * h * sizeof(short));
 	
 	printf("Diagonal: %i\n", diagonal);
-	int lower = 0, peak = 0, upper = scale_to_dist(1, diagonal);
+	int lower = 0, peak = 1, upper = scale_to_dist(1, diagonal);
 	for (int scale = 0; scale < WAVELET_DEPTH; scale ++)
 	{
 		printf("Scale %i: L %i, P %i, U %i, (%f/%f), graph: %i\n", scale, lower, peak, upper, sqrt(peak), sqrt(diagonal), (int)(dist_to_graph(scale_to_dist(scale, diagonal), diagonal)*GRAPH_WIDTH));
@@ -190,7 +190,8 @@ void wavelet_prepare(PluginData *pd){
 		for (int i=0; i < pw*h; i++){
 			multiplied[i][0] = multiplied[i][1] = 0.0;
 		}
-		for (int i=0; i < pw*h; i++){
+		for (int i=0; i < pw*h; i++)
+		{
 			int x, y;
 			x = i % pw;
 			y = i / pw;
@@ -199,7 +200,7 @@ void wavelet_prepare(PluginData *pd){
 			}
 			int dist = x*x + y*y;
 			if (dist < upper){
-				if (dist >= lower){
+				if (dist > lower){
 					if (dist >= peak){
 						for(int cur_bpp=0; cur_bpp < pd->img_bpp; cur_bpp ++)
 						{
@@ -231,7 +232,8 @@ void wavelet_prepare(PluginData *pd){
 		}
 		// apply inverse FFT
 		fftwf_execute_dft_c2r(pd->plan, multiplied, image_temp);
-		for (int i=0; i < w*h; i++){
+		for (int i=0; i < w*h; i++)
+		{
 			pd->image_wavelet[i*WAVELET_DEPTH + scale] = image_temp[i];//CLAMPED(image_temp[i], -128, 127);
 		}
 		lower = peak;
@@ -247,7 +249,8 @@ void wavelet_apply(PluginData *pd, int out_x, int out_y, int out_w, int out_h){
 	float diagonal = (h*h + w*w)/4;
 	for (int scale=0; scale<WAVELET_DEPTH; scale++)
 	{
-		coef[scale] = curve_get_value(dist_to_graph(scale_to_dist(scale, diagonal), diagonal), &pd->curve_user);
+		float x = dist_to_graph(scale_to_dist(scale, diagonal), diagonal);
+		coef[scale] = curve_get_value(x, &pd->curve_user) - curve_get_value(x, &pd->curve_fft);
 	}
 	for (int y=0; y<out_h; y++)
 	{
@@ -261,7 +264,7 @@ void wavelet_apply(PluginData *pd, int out_x, int out_y, int out_w, int out_h){
 			}
 			for (int cur_bpp=0; cur_bpp < pd->img_bpp; cur_bpp ++)
 			{
-				pd->img_pixels[(y*out_w+x)*pd->img_bpp + cur_bpp] = CLAMPED(v,0,255);
+				pd->img_pixels[(y*out_w+x)*pd->img_bpp + cur_bpp] = CLAMPED(pd->image[cur_bpp][(y+out_y)*w+(x+out_x)] + v,0,255);
 			}
 		}
 	}
@@ -310,9 +313,21 @@ void graph_update(PluginData *pd)
 
 void curve_init(Curve *c){
 	c->count = 0;
-	for (int i=0; i<GRAPH_WIDTH; i++){
+	for (int i=0; i<GRAPH_WIDTH; i++)
+	{
 		c->points[i].x = i;
 		c->points[i].y = GRAPH_HEIGHT/2;
+	}
+}
+void curve_copy(Curve *src, Curve *dest){
+	dest->count = src->count;
+	for (int i=0; i<src->count; i++)
+	{
+		dest->user_points[i] = src->user_points[i];
+	}
+	for (int i=0; i<GRAPH_WIDTH; i++)
+	{
+		dest->points[i] = src->points[i];
 	}
 }
 // distance in frequency domain -> graph x
@@ -517,7 +532,7 @@ static gint graph_events (GtkWidget *widget, GdkEvent *event, PluginData *pd)
 	return FALSE;
 }
 
-gint preview_clicked(GtkWidget *widget, PluginData *pd)
+void wavelet_preview(PluginData *pd)
 {
 	int x, y, w, h;
 	gimp_preview_get_position (GIMP_PREVIEW(pd->preview), &x, &y);
@@ -528,10 +543,16 @@ gint preview_clicked(GtkWidget *widget, PluginData *pd)
 	
 	gimp_pixel_rgn_set_rect(&pd->region, pd->img_pixels, x, y, w, h);
 	gimp_drawable_preview_draw_region(GIMP_DRAWABLE_PREVIEW(pd->preview), &pd->region);
-	return FALSE;
 }
 gint preview_invalidated(PluginData *pd, GtkWidget *preview){
-	return preview_clicked(preview, pd);
+	wavelet_preview(pd);
+	return FALSE;
+}
+gint preview_thorough(GtkWidget *preview, PluginData *pd){
+	curve_copy(&pd->curve_user, &pd->curve_fft);
+	fft_apply(pd);
+	wavelet_preview(pd);
+	return FALSE;
 }
 gboolean dialog(PluginData *pd)
 {
@@ -550,6 +571,7 @@ gboolean dialog(PluginData *pd)
 	gtk_container_add (GTK_CONTAINER(GTK_DIALOG(dialog)->vbox), main_hbox);
 	
 	curve_init(&pd->curve_user);
+	curve_copy(&pd->curve_user, &pd->curve_fft);
 	
   pd->preview = gimp_drawable_preview_new (pd->drawable, 0);
   gtk_box_pack_start (GTK_BOX (main_hbox), pd->preview, TRUE, TRUE, 0);
@@ -576,7 +598,7 @@ gboolean dialog(PluginData *pd)
   preview_button = gtk_button_new_with_mnemonic ("HD _Preview");
   gtk_box_pack_start (GTK_BOX (vbox), preview_button, FALSE, FALSE, 0);
   gtk_widget_show (preview_button);
-	g_signal_connect (preview_button, "clicked", G_CALLBACK (preview_clicked), pd);
+	g_signal_connect (preview_button, "clicked", G_CALLBACK (preview_thorough), pd);
 	
 	gtk_widget_show(main_hbox);
 	gtk_widget_show(dialog);
