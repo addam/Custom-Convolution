@@ -1,3 +1,10 @@
+/*
+Compile using GCC:
+g++ -O2 -g -pthread -I/usr/include/freetype2 -I/usr/include/atk-1.0 -I/usr/include/pango-1.0 -I/usr/include/gimp-2.0 -I/usr/include/gdk-pixbuf-2.0 -I/usr/include/cairo -I/usr/include/libpng12 -I/usr/include/glib-2.0 -I/usr/lib/glib-2.0/include -I/usr/include/pixman-1 -I/usr/include/gtk-2.0 -I/usr/lib/gtk-2.0/include -I/usr/include/gio-unix-2.0/ -pthread -L/usr/lib/x86_64-linux-gnu -lfftw3f -lgimpui-2.0 -lgimpwidgets-2.0 -lgimpmodule-2.0 -lgimp-2.0 -lgimpmath-2.0 -lgimpconfig-2.0 -lgimpcolor-2.0 -lgimpbase-2.0 -lgtk-x11-2.0 -lgdk-x11-2.0 -latk-1.0 -lgio-2.0 -lpangoft2-1.0 -lpangocairo-1.0 -lgdk_pixbuf-2.0 -lm -lcairo -lpango-1.0 -lfreetype -lfontconfig -lgobject-2.0 -lgmodule-2.0 -lgthread-2.0 -lrt -lglib-2.0 -o gimp-test plugin.c  
+Install into gimp:
+gimptool-2.0 --install-bin gimp-test
+*/
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -9,8 +16,6 @@
 #include <libgimpwidgets/gimpwidgets.h>
 
 #include <fftw3.h>
-
-/** Defines ******************************************************************/
 
 #define CLAMPED(x,l,r) (((x)<(l))?(l):(((x)>(r))?(r):(x)))
 
@@ -36,12 +41,13 @@ typedef struct PluginData {
   GimpDrawable      *drawable;
   GimpPixelRgn       region;
 
-	gint              img_width, img_height, img_offset_x, img_offset_y;
-	gint              img_bpp;
+	gint              image_width, image_height;
+	gint              selection_offset_x, selection_offset_y, selection_width, selection_height;
+	gint              channel_count;
 	fftwf_complex   **image_freq; // array of pointers to image for each channel, frequency domain
 	short            *image_wavelet; // an array of wavelet images: y->x->scale
-	float           **image;  // same as above, image domain (fixme: remove?)
-	guchar           *img_pixels; // array used for acquiring data from the drawable
+	float           **image;  // same as above, image domain
+	guchar           *img_pixels; // array used for transfering data from/to GIMP
 	fftwf_plan        plan;
 
 	Curve             curve_user, curve_fft;
@@ -75,80 +81,80 @@ GimpPlugInInfo PLUG_IN_INFO = {NULL, NULL, query, run};
 
 void fft_prepare(PluginData *pd)
 {
-	gint         w = pd->img_width, h = pd->img_height;
-	gint         img_bpp = pd->img_bpp, cur_bpp;
+	gint         w = pd->image_width, h = pd->image_height;
+	gint         channel_count = pd->channel_count;
 	int          x, y;
 	float      **image;
 	guchar      *img_pixels;
 	float        norm;
-	image = pd->image = (float**) malloc(sizeof(float*) * img_bpp);
-	pd->image_freq = (fftwf_complex**) malloc(sizeof(fftwf_complex*) * img_bpp);
-  img_pixels = pd->img_pixels = g_new (guchar, w * h * img_bpp);
+	image = pd->image = (float**) malloc(sizeof(float*) * channel_count);
+	pd->image_freq = (fftwf_complex**) malloc(sizeof(fftwf_complex*) * channel_count);
+  img_pixels = pd->img_pixels = g_new (guchar, w * h * channel_count);
   //allocate an array for each channel
-  for (cur_bpp=0; cur_bpp<img_bpp; cur_bpp ++){
-	  image[cur_bpp] = (float*) fftwf_malloc(sizeof(float) * w * h);
-		pd->image_freq[cur_bpp] = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * (w/2+1) * h);
+  for (int channel = 0; channel < channel_count; channel ++){
+	  image[channel] = (float*) fftwf_malloc(sizeof(float) * w * h);
+		pd->image_freq[channel] = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * (w/2+1) * h);
 	}
-	printf("Image data occupies %lu MB.\n", (sizeof(float) * w * h * img_bpp) >> 20);
-	printf("Frequency data occupies %lu MB.\n", (sizeof(fftwf_complex) * (w/2+1) * h * img_bpp) >> 20);
+	printf("Image data occupies %lu MB.\n", (sizeof(float) * w * h * channel_count) >> 20);
+	printf("Frequency data occupies %lu MB.\n", (sizeof(fftwf_complex) * (w/2+1) * h * channel_count) >> 20);
 	
 	// forward plan
-	fftwf_plan plan = fftwf_plan_dft_r2c_2d(pd->img_height, pd->img_width, *image, *pd->image_freq, FFTW_ESTIMATE);
+	fftwf_plan plan = fftwf_plan_dft_r2c_2d(pd->image_height, pd->image_width, *image, *pd->image_freq, FFTW_ESTIMATE);
 	// inverse plan (to be reused)
-	pd->plan = fftwf_plan_dft_c2r_2d(pd->img_height, pd->img_width, *pd->image_freq, *image, FFTW_ESTIMATE);
+	pd->plan = fftwf_plan_dft_c2r_2d(pd->image_height, pd->image_width, *pd->image_freq, *image, FFTW_ESTIMATE);
 
 	// set image region to reading mode
-	gimp_pixel_rgn_init (&pd->region, pd->drawable, pd->img_offset_x, pd->img_offset_y, w, h, FALSE, FALSE);
-	gimp_pixel_rgn_get_rect(&pd->region, img_pixels, pd->img_offset_x, pd->img_offset_y, w, h);
+	gimp_pixel_rgn_init (&pd->region, pd->drawable, 0, 0, w, h, FALSE, FALSE);
+	gimp_pixel_rgn_get_rect(&pd->region, img_pixels, 0, 0, w, h);
 	
 	// execute forward FFT once
 	int pw = w/2+1; // physical width
 	float diagonal = sqrt(h*h + w*w)/2.0;
 	norm = 1.0/(w*h);
-	for(cur_bpp=0; cur_bpp<img_bpp; cur_bpp++)
+	for(int channel=0; channel<channel_count; channel++)
 	{
 		// convert one color channel to float[]
 		for(x=0; x < w; x ++)
 		{
 			for(y=0; y < h; y ++)
 			{
-				 image[cur_bpp][y*w + x] =  (float) img_pixels[(y*w + x)*img_bpp + cur_bpp] * norm;
+				 image[channel][y*w + x] =  (float) img_pixels[(y*w + x)*channel_count + channel] * norm;
 			}
 		}
 		// transform the channel
-		fftwf_execute_dft_r2c(plan, image[cur_bpp], pd->image_freq[cur_bpp]);
+		fftwf_execute_dft_r2c(plan, image[channel], pd->image_freq[channel]);
 	}
 	fftwf_destroy_plan(plan);
 }
 void fft_apply(PluginData *pd)
 {
-	int w = pd->img_width, h = pd->img_height,
+	int w = pd->image_width, h = pd->image_height,
 		pw = w/2+1; // physical width
 	fftwf_complex *multiplied = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * pw * h);
 	float diagonal = sqrt(h*h + w*w)/2.0;
 	// save current state of the curve
 	curve_copy(&pd->curve_user, &pd->curve_fft);
-	for(int cur_bpp=0; cur_bpp < pd->img_bpp; cur_bpp++)
+	for(int channel=0; channel < pd->channel_count; channel++)
 	{
 		//skip DC value
-		multiplied[0][0] = pd->image_freq[cur_bpp][0][0];
-		multiplied[0][1] = pd->image_freq[cur_bpp][0][1];
+		multiplied[0][0] = pd->image_freq[channel][0][0];
+		multiplied[0][1] = pd->image_freq[channel][0][1];
 		// apply convolution
 		for (int i=1; i < pw*h; i++){
 			float dist = index_to_dist(i, pw, h);
 			float coef = curve_get_value(dist_to_graph(dist), &pd->curve_fft);
-			multiplied[i][0] = pd->image_freq[cur_bpp][i][0] * coef;
-			multiplied[i][1] = pd->image_freq[cur_bpp][i][1] * coef;
+			multiplied[i][0] = pd->image_freq[channel][i][0] * coef;
+			multiplied[i][1] = pd->image_freq[channel][i][1] * coef;
 		}
 		// apply inverse FFT
-		fftwf_execute_dft_c2r(pd->plan, multiplied, pd->image[cur_bpp]);
+		fftwf_execute_dft_c2r(pd->plan, multiplied, pd->image[channel]);
 		// pack results for GIMP
 		for(int x=0; x < w; x ++)
 		{
 			for(int y=0; y < h; y ++)
 			{
-				float v = pd->image[cur_bpp][y*w + x];
-				pd->img_pixels[(y*w + x) * pd->img_bpp+cur_bpp] = CLAMPED(v,0,255);
+				float v = pd->image[channel][y*w + x];
+				pd->img_pixels[(y*w + x)*pd->channel_count + channel] = CLAMPED(v,0,255);
 			}
 		}
 	}
@@ -157,7 +163,7 @@ void fft_apply(PluginData *pd)
 void fft_destroy(PluginData *pd)
 {
 	fftwf_destroy_plan(pd->plan);
-	for (int i=0; i<pd->img_bpp; i++){
+	for (int i=0; i<pd->channel_count; i++){
 		fftwf_free(pd->image[i]);
 		fftwf_free(pd->image_freq[i]);
 	}
@@ -171,7 +177,7 @@ int scale_to_dist(int scale, int diagonal){
 		return 1UL<<(scale+2);
 }
 void wavelet_prepare(PluginData *pd){
-	int w = pd->img_width, h = pd->img_height,
+	int w = pd->image_width, h = pd->image_height,
 		pw = w/2+1; // physical width
 	fftwf_complex *multiplied = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * pw * h);
 	float *image_temp = (float*)fftwf_malloc(sizeof(float) * w * h);
@@ -179,6 +185,7 @@ void wavelet_prepare(PluginData *pd){
 	pd->image_wavelet = (short*)fftwf_malloc(WAVELET_DEPTH * w * h * sizeof(short));
 	printf("Wavelet layers occupy %lu MB.\n", (WAVELET_DEPTH * w * h * sizeof(short)) >> 20);
 	
+	// TODO: keep only the selected part of the image (save memory)
 	int lower = 0, peak = 1, upper = scale_to_dist(1, diagonal);
 	for (int scale = 0; scale < WAVELET_DEPTH; scale ++)
 	{
@@ -193,22 +200,22 @@ void wavelet_prepare(PluginData *pd){
 			if (dist <= upper){
 				if (dist > lower){
 					if (dist > peak){
-						for(int cur_bpp=0; cur_bpp < pd->img_bpp; cur_bpp ++)
+						for(int channel=0; channel < pd->channel_count; channel ++)
 						{
-							multiplied[i][0] += pd->image_freq[cur_bpp][i][0];
-							multiplied[i][1] += pd->image_freq[cur_bpp][i][1];
+							multiplied[i][0] += pd->image_freq[channel][i][0];
+							multiplied[i][1] += pd->image_freq[channel][i][1];
 						}
-						float coef = (1.0 - (dist-peak)/above) / pd->img_bpp;
+						float coef = (1.0 - (dist-peak)/above) / pd->channel_count;
 						multiplied[i][0] *= coef;
 						multiplied[i][1] *= coef;
 					}
 					else {
-						for(int cur_bpp=0; cur_bpp < pd->img_bpp; cur_bpp ++)
+						for(int channel=0; channel < pd->channel_count; channel ++)
 						{
-							multiplied[i][0] += pd->image_freq[cur_bpp][i][0];// - multiplied[i][0];
-							multiplied[i][1] += pd->image_freq[cur_bpp][i][1];// - multiplied[i][1];
+							multiplied[i][0] += pd->image_freq[channel][i][0];// - multiplied[i][0];
+							multiplied[i][1] += pd->image_freq[channel][i][1];// - multiplied[i][1];
 						}
-						float coef = (1.0 - (peak-dist)/below) / pd->img_bpp;
+						float coef = (1.0 - (peak-dist)/below) / pd->channel_count;
 						multiplied[i][0] *= coef;
 						multiplied[i][1] *= coef;
 					}
@@ -235,7 +242,7 @@ void wavelet_prepare(PluginData *pd){
 	fftwf_free(image_temp);
 }
 void wavelet_apply(PluginData *pd, int out_x, int out_y, int out_w, int out_h){
-	int w = pd->img_width, h = pd->img_height;
+	int w = pd->image_width, h = pd->image_height;
 	if (pd->curve_user_changed)
 	{
 		// estimate needed coefficient for each wavelet layer
@@ -262,22 +269,22 @@ void wavelet_apply(PluginData *pd, int out_x, int out_y, int out_w, int out_h){
 				{
 					// darken the pixel: multiply all channels
 					float value = 0; // current value of the pixel
-					for (int cur_bpp=0; cur_bpp < pd->img_bpp; cur_bpp ++)
+					for (int channel=0; channel < pd->channel_count; channel ++)
 					{
-						value += pd->image[cur_bpp][(y+out_y)*w+(x+out_x)];
+						value += pd->image[channel][(y+out_y)*w+(x+out_x)];
 					}
-					value = value/pd->img_bpp;
-					for (int cur_bpp=0; cur_bpp < pd->img_bpp; cur_bpp ++)
+					value = value/pd->channel_count;
+					for (int channel=0; channel < pd->channel_count; channel ++)
 					{
-						pd->img_pixels[(y*out_w+x)*pd->img_bpp + cur_bpp] = CLAMPED(pd->image[cur_bpp][(y+out_y)*w+(x+out_x)] * (1 + diff/value), 0, 255);
+						pd->img_pixels[(y*out_w+x)*pd->channel_count + channel] = CLAMPED(pd->image[channel][(y+out_y)*w+(x+out_x)] * (1 + diff/value), 0, 255);
 					}
 				}
 				else
 				{
 					// brighten the pixel: add value to all channels
-					for (int cur_bpp=0; cur_bpp < pd->img_bpp; cur_bpp ++)
+					for (int channel=0; channel < pd->channel_count; channel ++)
 					{
-						pd->img_pixels[(y*out_w+x)*pd->img_bpp + cur_bpp] = CLAMPED(pd->image[cur_bpp][(y+out_y)*w+(x+out_x)] + diff, 0, 255);
+						pd->img_pixels[(y*out_w+x)*pd->channel_count + channel] = CLAMPED(pd->image[channel][(y+out_y)*w+(x+out_x)] + diff, 0, 255);
 					}
 				}
 			}
@@ -290,9 +297,9 @@ void wavelet_apply(PluginData *pd, int out_x, int out_y, int out_w, int out_h){
 		{
 			for (int x=0; x<out_w; x++)
 			{
-				for (int cur_bpp=0; cur_bpp < pd->img_bpp; cur_bpp ++)
+				for (int channel=0; channel < pd->channel_count; channel ++)
 				{
-					pd->img_pixels[(y*out_w+x)*pd->img_bpp + cur_bpp] = CLAMPED(pd->image[cur_bpp][(y+out_y)*w+(x+out_x)], 0, 255);
+					pd->img_pixels[(y*out_w+x)*pd->channel_count + channel] = CLAMPED(pd->image[channel][(y+out_y)*w+(x+out_x)], 0, 255);
 				}
 			}
 		}
@@ -303,17 +310,17 @@ void wavelet_destroy(PluginData *pd){
 }
 // Generate a histogram from FFT data
 void histogram_generate(PluginData *pd){
-	int pw = pd->img_width/2+1, h = pd->img_height;
+	int pw = pd->image_width/2+1, h = pd->image_height;
 	for (int i=0; i<GRAPH_WIDTH; i++)
 	{
 		pd->histogram[i] = 0;
 	}
-	for(int cur_bpp=0; cur_bpp<pd->img_bpp; cur_bpp++)
+	for(int channel=0; channel<pd->channel_count; channel++)
 	{
 		// add value to histogram
 		for(int i=0; i<pw*h; i++)
 		{
-			float *pixel = (float*)(pd->image_freq[cur_bpp] + i);
+			float *pixel = (float*)(pd->image_freq[channel] + i);
 			float val = sqrt(pixel[0]*pixel[0] + pixel[1]*pixel[1]);
 			float dist = index_to_dist(i, pw, h);
 			pd->histogram[(unsigned)(GRAPH_WIDTH*CLAMPED(dist_to_graph(dist), 0, 1))] += val/(dist+1);
@@ -363,7 +370,7 @@ void graph_redraw(PluginData *pd)
 	}
 	gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], GRAPH_WIDTH-1, 0, GRAPH_WIDTH-1, GRAPH_HEIGHT);
 	// wavelet marks
-	float diagonal = (pd->img_width*pd->img_width + pd->img_height*pd->img_height)/4;
+	float diagonal = sqrt(pd->image_width*pd->image_width + pd->image_height*pd->image_height)/2;
 	for (int i = 0; i < WAVELET_DEPTH; i++)
 	{
 		int x = CLAMPED(dist_to_graph(scale_to_dist(i, diagonal))*GRAPH_WIDTH, 0, GRAPH_WIDTH-1);
@@ -634,7 +641,7 @@ void wavelet_preview(PluginData *pd)
 	int x, y, w, h;
 	gimp_preview_get_position (GIMP_PREVIEW(pd->preview), &x, &y);
 	gimp_preview_get_size (GIMP_PREVIEW(pd->preview), &w, &h);
-	gimp_pixel_rgn_init (&pd->region, pd->drawable, pd->img_offset_x, pd->img_offset_y, pd->img_width, pd->img_height, FALSE, TRUE);
+	gimp_pixel_rgn_init (&pd->region, pd->drawable, 0, 0, pd->image_width, pd->image_height, FALSE, TRUE);
 	wavelet_apply(pd, x, y, w, h);
 	
 	gimp_pixel_rgn_set_rect(&pd->region, pd->img_pixels, x, y, w, h);
@@ -738,13 +745,13 @@ gboolean dialog(PluginData *pd)
 	gboolean run = (gimp_dialog_run (GIMP_DIALOG (dialog)) == GTK_RESPONSE_OK);
 	if (run) {
 		// set the region mode to actual writing
-		gimp_pixel_rgn_init(&pd->region, pd->drawable, pd->img_offset_x, pd->img_offset_y, pd->img_width, pd->img_height, TRUE, TRUE);
+		gimp_pixel_rgn_init(&pd->region, pd->drawable, 0, 0, pd->image_width, pd->image_height, TRUE, TRUE);
 		fft_apply(pd);
+		gimp_pixel_rgn_set_rect(&pd->region, pd->img_pixels, 0, 0, pd->image_width, pd->image_height);
 		// show the result
-		gimp_pixel_rgn_set_rect(&pd->region, pd->img_pixels, pd->img_offset_x, pd->img_offset_y, pd->img_width, pd->img_height);
 		gimp_drawable_flush(pd->drawable);
 		gimp_drawable_merge_shadow(pd->drawable->drawable_id, TRUE);
-		gimp_drawable_update(pd->drawable->drawable_id, pd->img_offset_x, pd->img_offset_y, pd->img_width, pd->img_height);
+		gimp_drawable_update(pd->drawable->drawable_id, pd->selection_offset_x, pd->selection_offset_y, pd->selection_width, pd->selection_height);
 		gimp_displays_flush();
 	}
 	fft_destroy(pd);
@@ -793,7 +800,6 @@ run (const gchar      *name,
 	// Return values
   static GimpParam values[1];
 
-  GimpDrawable      *drawable;
   gint sel_x1, sel_y1, sel_x2, sel_y2, w, h, padding;
 	PluginData         pd;
   GimpRunMode        run_mode;
@@ -809,13 +815,15 @@ run (const gchar      *name,
 
   run_mode = (GimpRunMode) param[0].data.d_int32;
 	
-	drawable = pd.drawable = gimp_drawable_get(param[2].data.d_drawable);
-	gimp_drawable_mask_bounds(drawable->drawable_id, &sel_x1, &sel_y1, &sel_x2, &sel_y2);
-	pd.img_width = sel_x2 - sel_x1;
-  pd.img_height = sel_y2 - sel_y1;
-  pd.img_offset_x = sel_x1;
-  pd.img_offset_y = sel_y1;
-  pd.img_bpp = gimp_drawable_bpp(drawable->drawable_id);
+	pd.drawable = gimp_drawable_get(param[2].data.d_drawable);
+	gimp_drawable_mask_bounds(pd.drawable->drawable_id, &sel_x1, &sel_y1, &sel_x2, &sel_y2);
+	pd.selection_width = sel_x2 - sel_x1;
+  pd.selection_height = sel_y2 - sel_y1;
+  pd.selection_offset_x = sel_x1;
+  pd.selection_offset_y = sel_y1;
+  pd.image_width = gimp_drawable_width(pd.drawable->drawable_id);
+  pd.image_height = gimp_drawable_height(pd.drawable->drawable_id);
+  pd.channel_count = gimp_drawable_bpp(pd.drawable->drawable_id);
 
   pd.point_grabbed = -1;
 
@@ -829,12 +837,12 @@ run (const gchar      *name,
 		fft_prepare(&pd);
 		gimp_get_data(PLUG_IN_BINARY, pd.curve_user.user_points);
 		pd.curve_user.count = gimp_get_data_size(PLUG_IN_BINARY) / sizeof (GdkPoint);
-		gimp_pixel_rgn_init(&pd.region, pd.drawable, pd.img_offset_x, pd.img_offset_y, pd.img_width, pd.img_height, TRUE, TRUE);
+		gimp_pixel_rgn_init(&pd.region, pd.drawable, 0, 0, pd.image_width, pd.image_height, TRUE, TRUE);
 		fft_apply(&pd);
-		gimp_pixel_rgn_set_rect(&pd.region, pd.img_pixels, pd.img_offset_x, pd.img_offset_y, pd.img_width, pd.img_height);
+		gimp_pixel_rgn_set_rect(&pd.region, pd.img_pixels, 0, 0, pd.image_width, pd.image_height);
 		gimp_drawable_flush(pd.drawable);
 		gimp_drawable_merge_shadow(pd.drawable->drawable_id, TRUE);
-		gimp_drawable_update(pd.drawable->drawable_id, pd.img_offset_x, pd.img_offset_y, pd.img_width, pd.img_height);
+		gimp_drawable_update(pd.drawable->drawable_id, pd.selection_offset_x, pd.selection_offset_y, pd.selection_width, pd.selection_height);
 		fft_destroy(&pd);
 		gimp_displays_flush();
 	}
@@ -844,5 +852,5 @@ run (const gchar      *name,
 	}
   values[0].type = GIMP_PDB_STATUS;
   values[0].data.d_status = status;
-  gimp_drawable_detach(drawable);
+  gimp_drawable_detach(pd.drawable);
 }
