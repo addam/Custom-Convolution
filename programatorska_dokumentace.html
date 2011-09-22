@@ -1,0 +1,17 @@
+<html>
+<head>
+	<title>Frekvenční křivky - dokumentace</title>
+</head>
+<body>
+<h1>Frekvenční křivky - dokumentace kódu</h1>
+<h2>Základní návrh</h2>
+<p>Samotná konvoluce se provádí převedením obrázku do Fourierovského frekvenčního prostoru, přenásobením každého pixelu příslušným koeficientem, a převedením zpět na obrázek. Protože není možné takto získat jen část obrázku, pro náhled je použit rozklad do několika vrstev podle frekvence; ty stačí s vhodnými koeficienty sečíst. Kromě toho se plugin sám stará o zobrazení okénka s křivkou a histogramem.</p>
+<h2>FFT a konvoluce</h2>
+<p>Po spuštění programu je každý kanál obrázku jednotlivě převeden do formátu s plovoucí desetinou čárkou (single-precision), na který se zavolá diskrétní dvourozměrná Fourierova transformace. Výsledek (pro každý kanál odděleně) se uchovává v paměti po celou dobu běhu programu. Nezávisle na výběru je vždy takto převeden celý obrázek.</p>
+<p>Konvoluce se provádí také pro každý kanál jednotlivě. Pro každý pixel ve frekvenční doméně se stanoví velikost (dvousložkového vektoru) frekvence, která mu odpovídá, a pixel je přenásoben příslušnou hodnotou křivky. Po přenásobení všech pixelů jednoho kanálu se provede inverzní Fourierova transformace.</p>
+<h2>Náhledové vrstvy</h2>
+<p>Pro účely náhledu se obrázek rozloží do pevného počtu vrstev (nezávisle na velikosti obrázku, pro zjednodušení), které každá obsahují určitou část jeho frekvenčního spektra. Vybraná část každé vrstvy je trojúhelníková křivka se špičkou ve frekvenci 4^N a s okraji ve špičkách sousedních vrstev. Aby daly v součtu celé spektrum nepozměněné, vrstva nejnižšího řádu má špičku o frekvenci 1 a vrstva nejvyššího řádu má špičku v nejvyšší možné frekvenci (polovina úhlopříčky obrázku). Ve výchozím nastavení je vrstev 6, což je možné změnit makrem WAVELET_DEPTH (nejmenší platná hodnota je 2).</p>
+<p>Vždy po vygenerování náhledu ve vysoké kvalitě (konvolucí) si program zapamatuje křivku, kterou k tomu použil, a samotný výsledek, tj. upravený obrázek. Náhled v nízké kvalitě potom pouze upravuje tento kvalitní výsledek podle toho, jak se jeho křivka liší od té aktuální.</p>
+<p>Konkrétněji, každá vrstva vzorkuje obě křivky v bodě, který přísluší její spektrální špičce, a přenásobí se rozdílem těchto navzorkovaných hodnot. Pro přesnější náhled by jistě pomohlo křivky integrovat, ale pro hrubý odhad a nepříliš hrubé křivky jeden vzorek stačí.</p>
+<p>Pro šetření pamětí </p>
+</body>

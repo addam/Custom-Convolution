@@ -1,28 +1,24 @@
 /*
 Compile using GCC:
-g++ -O2 -g -pthread -I/usr/include/freetype2 -I/usr/include/atk-1.0 -I/usr/include/pango-1.0 -I/usr/include/gimp-2.0 -I/usr/include/gdk-pixbuf-2.0 -I/usr/include/cairo -I/usr/include/libpng12 -I/usr/include/glib-2.0 -I/usr/lib/glib-2.0/include -I/usr/include/pixman-1 -I/usr/include/gtk-2.0 -I/usr/lib/gtk-2.0/include -I/usr/include/gio-unix-2.0/ -pthread -L/usr/lib/x86_64-linux-gnu -lfftw3f -lgimpui-2.0 -lgimpwidgets-2.0 -lgimpmodule-2.0 -lgimp-2.0 -lgimpmath-2.0 -lgimpconfig-2.0 -lgimpcolor-2.0 -lgimpbase-2.0 -lgtk-x11-2.0 -lgdk-x11-2.0 -latk-1.0 -lgio-2.0 -lpangoft2-1.0 -lpangocairo-1.0 -lgdk_pixbuf-2.0 -lm -lcairo -lpango-1.0 -lfreetype -lfontconfig -lgobject-2.0 -lgmodule-2.0 -lgthread-2.0 -lrt -lglib-2.0 -o gimp-test plugin.c  
+gcc -std=c99 -O2 $(pkg-config fftw3f gimp-2.0 gimpui-2.0 gtk+-2.0 --libs --cflags) -o gimp-frequency-curves plugin.c  
 Install into gimp:
-gimptool-2.0 --install-bin gimp-test
+gimptool-2.0 --install-bin gimp-frequency-curves
 */
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-#include <time.h>
-#include <string.h>
+#include <limits.h>
 #include <gtk/gtk.h>
 #include <libgimp/gimp.h>
 #include <libgimp/gimpui.h>
-#include <libgimpwidgets/gimpwidgets.h>
-
 #include <fftw3.h>
 
 #define CLAMPED(x,l,r) (((x)<(l))?(l):(((x)>(r))?(r):(x)))
 
-#define PLUG_IN_NAME "plug_in_addam_test"
-#define PLUG_IN_BINARY "gimp-test"
+#define PLUG_IN_NAME "plug_in_frequency_curves"
+#define PLUG_IN_BINARY "gimp-frequency-curves"
 #define PLUG_IN_AUTHOR "Addam Dominec"
-#define PLUG_IN_VERSION "Aug 2011, 0.4.1"
+#define PLUG_IN_VERSION "September 2011"
 
 #define WAVELET_DEPTH 6
 #define GRAPH_WIDTH 200
@@ -54,21 +50,47 @@ typedef struct PluginData {
 	gboolean          curve_user_changed;
 	GtkWidget        *graph;
 	float             histogram[GRAPH_WIDTH];
-	int               point_grabbed; //FIXME: patří ke křivce
+	int               point_grabbed;
 	GdkPixmap        *graph_pixmap;
 	
 	GtkWidget        *preview;
 	gboolean          do_preview_hd;
 } PluginData;
 
-void curve_copy(Curve *src, Curve *dest);
+// Image processing
+void fft_prepare(PluginData *pd);
+void fft_apply(PluginData *pd);
+void fft_destroy(PluginData *pd);
+void wavelet_prepare(PluginData *pd);
+void wavelet_apply(PluginData *pd, int out_x, int out_y, int out_w, int out_h);
+void wavelet_destroy(PluginData *pd);
+void histogram_generate(PluginData *pd); // Generate a histogram from FFT data
+
+// Curve handling
+void curve_init(Curve *c); // Curve constructor: set values to default (no destructor needed)
+void curve_copy(Curve *src, Curve *dest); // Copy data from src to dest
 float curve_get_value(float x, Curve *c); // interpolate the curve at an arbitrary point in range [0; 1]
-float index_to_dist(int index, int width, int height); // get wavelenght from index in FFT array
-float graph_to_dist(float x);
-float dist_to_graph(float dist); // map pixel distance to graph x value
-int value_to_graph(float val);
-gint preview_hd(GtkWidget *preview, PluginData *pd);
-/** Plugin interface *********************************************************/
+void curve_update_part(int index, Curve *c); // Update curve parts to the left and to the right of given point
+int curve_add_point(int x, int y, Curve *c); // Insert a point into the curve
+void curve_remove_point(int index, Curve *c); // Remove a point from the curve
+int curve_move_point(int index, int x, int y, Curve *c); // Move a point to another position
+
+// Convertors
+int scale_to_dist(int scale, int diagonal); // Wavelet scale -> frequency magnitude (unnormalized)
+float index_to_dist(int index, int width, int height); // FFT array index -> frequency magnitude (unnormalized)
+float dist_to_graph(float dist); // Frequency magnitude (unnormalized) -> graph x (normalized)
+float graph_to_dist(float x); // Graph x coordinate (normalized) -> frequency magnitude (unnormalized)
+int value_to_graph(float val); // Actual curve value -> graph y coordinate (unnormalized)
+float graph_to_value(int y); // Graph y coordinate (unnormalized) -> curve value
+
+// User interface
+static gint graph_events (GtkWidget *widget, GdkEvent *event, PluginData *pd); // GTK event handler for the graph widget
+void graph_redraw(PluginData *pd); // Completely redraw the graph widget
+void wavelet_preview(PluginData *pd); // Combine wavelets with latest FFT result and show output in the preview widget
+gint preview_hd(GtkWidget *preview, PluginData *pd); // "HD preview" button clicked
+gint preview_hd_toggled(GtkWidget *checkbox, PluginData *pd); // "Always preview HD" checkbox was toggled
+gint preview_invalidated(PluginData *pd, GtkWidget *preview); // For any whatever reason, the preview must be redrawed
+gboolean dialog(PluginData *pd); // Create and handle the plugin's dialog
 
 static void query(void);
 static void run (const gchar      *name,
@@ -95,8 +117,8 @@ void fft_prepare(PluginData *pd)
 	  image[channel] = (float*) fftwf_malloc(sizeof(float) * w * h);
 		pd->image_freq[channel] = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * (w/2+1) * h);
 	}
-	printf("Image data occupies %lu MB.\n", (sizeof(float) * w * h * channel_count) >> 20);
-	printf("Frequency data occupies %lu MB.\n", (sizeof(fftwf_complex) * (w/2+1) * h * channel_count) >> 20);
+	// printf("Image data occupies %lu MB.\n", (sizeof(float) * w * h * channel_count) >> 20);
+	// printf("Frequency data occupies %lu MB.\n", (sizeof(fftwf_complex) * (w/2+1) * h * channel_count) >> 20);
 	
 	// forward plan
 	fftwf_plan plan = fftwf_plan_dft_r2c_2d(pd->image_height, pd->image_width, *image, *pd->image_freq, FFTW_ESTIMATE);
@@ -114,15 +136,21 @@ void fft_prepare(PluginData *pd)
 	for(int channel=0; channel<channel_count; channel++)
 	{
 		// convert one color channel to float[]
-		for(x=0; x < w; x ++)
+		for(int i=0; i < w*h; i ++)
 		{
-			for(y=0; y < h; y ++)
-			{
-				 image[channel][y*w + x] =  (float) img_pixels[(y*w + x)*channel_count + channel] * norm;
-			}
+			 image[channel][i] =  (float) img_pixels[(i)*channel_count + channel] * norm;
 		}
 		// transform the channel
 		fftwf_execute_dft_r2c(plan, image[channel], pd->image_freq[channel]);
+		for(int i=0; i < w*h; i ++)
+		{
+			 image[channel][i] =  (float) img_pixels[(i)*channel_count + channel] * norm;
+		}
+		// copy the channel again, for preview
+		for(int i=0; i < w*h; i ++)
+		{
+			 image[channel][i] =  (float) img_pixels[(i)*channel_count + channel];
+		}
 	}
 	fftwf_destroy_plan(plan);
 }
@@ -170,22 +198,17 @@ void fft_destroy(PluginData *pd)
 	free(pd->image);
 	free(pd->image_freq);
 }
-int scale_to_dist(int scale, int diagonal){
-	if (scale >= WAVELET_DEPTH-1 || 1UL<<WAVELET_DEPTH-1 > diagonal)
-		return diagonal;
-	else
-		return 1UL<<(scale+2);
-}
-void wavelet_prepare(PluginData *pd){
+void wavelet_prepare(PluginData *pd)
+{
 	int w = pd->image_width, h = pd->image_height,
 		pw = w/2+1; // physical width
 	fftwf_complex *multiplied = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * pw * h);
 	float *image_temp = (float*)fftwf_malloc(sizeof(float) * w * h);
 	float diagonal = sqrt(h*h + w*w)/2;
 	pd->image_wavelet = (short*)fftwf_malloc(WAVELET_DEPTH * w * h * sizeof(short));
-	printf("Wavelet layers occupy %lu MB.\n", (WAVELET_DEPTH * w * h * sizeof(short)) >> 20);
-	
-	// TODO: keep only the selected part of the image (save memory)
+	// printf("Wavelet layers occupy %lu MB.\n", (WAVELET_DEPTH * w * h * sizeof(short)) >> 20);
+	// TODO: keep only the selected part of the image (->save memory)
+
 	int lower = 0, peak = 1, upper = scale_to_dist(1, diagonal);
 	for (int scale = 0; scale < WAVELET_DEPTH; scale ++)
 	{
@@ -195,7 +218,6 @@ void wavelet_prepare(PluginData *pd){
 		}
 		for (int i=0; i < pw*h; i++)
 		{
-			//fixme: simplify
 			float dist = index_to_dist(i, pw, h);
 			if (dist <= upper){
 				if (dist > lower){
@@ -212,27 +234,21 @@ void wavelet_prepare(PluginData *pd){
 					else {
 						for(int channel=0; channel < pd->channel_count; channel ++)
 						{
-							multiplied[i][0] += pd->image_freq[channel][i][0];// - multiplied[i][0];
-							multiplied[i][1] += pd->image_freq[channel][i][1];// - multiplied[i][1];
+							multiplied[i][0] += pd->image_freq[channel][i][0];
+							multiplied[i][1] += pd->image_freq[channel][i][1];
 						}
 						float coef = (1.0 - (peak-dist)/below) / pd->channel_count;
 						multiplied[i][0] *= coef;
 						multiplied[i][1] *= coef;
 					}
 				}
-				else {
-					multiplied[i][0] = multiplied[i][1] = 0.0;
-				}
-			}
-			else {
-				multiplied[i][0] = multiplied[i][1] = 0.0;
 			}
 		}
 		// apply inverse FFT
 		fftwf_execute_dft_c2r(pd->plan, multiplied, image_temp);
 		for (int i=0; i < w*h; i++)
 		{
-			pd->image_wavelet[i*WAVELET_DEPTH + scale] = image_temp[i];//CLAMPED(image_temp[i], -128, 127);
+			pd->image_wavelet[i*WAVELET_DEPTH + scale] = CLAMPED(image_temp[i], SHRT_MIN, SHRT_MAX);
 		}
 		lower = peak;
 		peak = upper;
@@ -241,7 +257,8 @@ void wavelet_prepare(PluginData *pd){
 	fftwf_free(multiplied);
 	fftwf_free(image_temp);
 }
-void wavelet_apply(PluginData *pd, int out_x, int out_y, int out_w, int out_h){
+void wavelet_apply(PluginData *pd, int out_x, int out_y, int out_w, int out_h)
+{
 	int w = pd->image_width, h = pd->image_height;
 	if (pd->curve_user_changed)
 	{
@@ -260,21 +277,22 @@ void wavelet_apply(PluginData *pd, int out_x, int out_y, int out_w, int out_h){
 			for (int x=0; x<out_w; x++)
 			{
 				short *pixel_wavelets = pd->image_wavelet + WAVELET_DEPTH*((y+out_y)*w +(x+out_x));
-				float diff = 0; // needed value of the pixel
+				// calculate needed brightness change (per channel)
+				float diff = 0; 
 				for (int scale=0; scale<WAVELET_DEPTH; scale ++)
 				{
 					diff += pixel_wavelets[scale] * coef[scale];
 				}
 				if (diff < 0)
 				{
-					// darken the pixel: multiply all channels
+					// darken the pixel: multiply all channels (to keep its hue)
 					float value = 0; // current value of the pixel
-					for (int channel=0; channel < pd->channel_count; channel ++)
+					for (int channel = 0; channel < pd->channel_count; channel ++)
 					{
 						value += pd->image[channel][(y+out_y)*w+(x+out_x)];
 					}
 					value = value/pd->channel_count;
-					for (int channel=0; channel < pd->channel_count; channel ++)
+					for (int channel = 0; channel < pd->channel_count; channel ++)
 					{
 						pd->img_pixels[(y*out_w+x)*pd->channel_count + channel] = CLAMPED(pd->image[channel][(y+out_y)*w+(x+out_x)] * (1 + diff/value), 0, 255);
 					}
@@ -282,7 +300,7 @@ void wavelet_apply(PluginData *pd, int out_x, int out_y, int out_w, int out_h){
 				else
 				{
 					// brighten the pixel: add value to all channels
-					for (int channel=0; channel < pd->channel_count; channel ++)
+					for (int channel = 0; channel < pd->channel_count; channel ++)
 					{
 						pd->img_pixels[(y*out_w+x)*pd->channel_count + channel] = CLAMPED(pd->image[channel][(y+out_y)*w+(x+out_x)] + diff, 0, 255);
 					}
@@ -305,11 +323,13 @@ void wavelet_apply(PluginData *pd, int out_x, int out_y, int out_w, int out_h){
 		}
 	}
 }
-void wavelet_destroy(PluginData *pd){
+void wavelet_destroy(PluginData *pd)
+{
 	fftwf_free(pd->image_wavelet);
 }
 // Generate a histogram from FFT data
-void histogram_generate(PluginData *pd){
+void histogram_generate(PluginData *pd)
+{
 	int pw = pd->image_width/2+1, h = pd->image_height;
 	for (int i=0; i<GRAPH_WIDTH; i++)
 	{
@@ -340,6 +360,7 @@ void histogram_generate(PluginData *pd){
 		pd->histogram[i] *= histogram_max;
 	}
 }
+// Completely redraw the graph widget
 void graph_redraw(PluginData *pd)
 {
 	GtkStyle *graph_style = gtk_widget_get_style (pd->graph);
@@ -405,7 +426,13 @@ void curve_copy(Curve *src, Curve *dest){
 		dest->points[i] = src->points[i];
 	}
 }
-
+// Wavelet scale -> frequency magnitude (unnormalized)
+int scale_to_dist(int scale, int diagonal){
+	if (scale >= WAVELET_DEPTH-1 || 1UL<<(scale+2) > diagonal)
+		return diagonal;
+	else
+		return 1UL<<(scale+2);
+}
 // FFT array index -> frequency magnitude (unnormalized)
 float index_to_dist(int index, int width, int height)
 {
@@ -418,22 +445,24 @@ float index_to_dist(int index, int width, int height)
 	return sqrt(x*x + y*y);
 }
 	
-// frequency magnitude (unnormalized) -> graph x (normalized)
+// Frequency magnitude (unnormalized) -> graph x (normalized)
 float dist_to_graph(float dist)
 {
-	float point = 1 - 1/(dist+1);
-	point = point * point;
+	// convert to wavelength and reverse direction
+	float point = 1 - 1/(dist+1); 
+	// 6th power - shows more interesting parts of the curve (more higher frequencies)
+	point = point * point; 
 	return point * point * point;
 }
 
-// graph x coordinate (normalized) -> frequency magnitude (unnormalized)
+// Graph x coordinate (normalized) -> frequency magnitude (unnormalized)
 float graph_to_dist(float x)
 {
 	float point = pow(x, 1.0/6);
 	return 1/(1-point) - 1;
 }
 	
-// value -> graph (unnormalized)
+// Actual curve value -> graph y coordinate (unnormalized)
 int value_to_graph(float val)
 {
 	if (val<1)
@@ -442,7 +471,7 @@ int value_to_graph(float val)
 		return GRAPH_HEIGHT/(2*val);
 }
 
-// graph (unnormalized) -> value
+// Graph y coordinate (unnormalized) -> curve value
 float graph_to_value(int y)
 {
 	if (y > GRAPH_HEIGHT/2)
@@ -453,7 +482,7 @@ float graph_to_value(int y)
 		return GRAPH_HEIGHT/2.0;
 }
 
-// interpolate the curve at a given point between two points with indices i1, i2 (unnormalized)
+// Interpolate the curve at a given point between two points with indices i1, i2 (normalized)
 float curve_interpolate(float x, int i1, int i2, Curve *c)
 {
 	// linear interpolation
@@ -462,11 +491,12 @@ float curve_interpolate(float x, int i1, int i2, Curve *c)
 	return ((x - x1) * graph_to_value(c->user_points[i2].y) + (x2 - x) * graph_to_value(c->user_points[i1].y)) / (x2 - x1);
 }
 
-// get index to the first larger element (compare by coordinate y)
+// Get index to the first larger element (compare by coordinate y)
 int gdkpoint_bisect (int item, GdkPoint *array, int count)
 {
 	int left = 0, right = count;
-	while (left != right){
+	while (left != right)
+	{
 		int test = (left+right)/2;
 		if (array[test].x > item)
 			right = test;
@@ -476,11 +506,12 @@ int gdkpoint_bisect (int item, GdkPoint *array, int count)
 	return left;
 }
 
-// interpolate the curve at an arbitrary point in range [0; 1]
+// Interpolate the curve at an arbitrary point in range [0; 1]
 float curve_get_value(float x, Curve *c)
 {
 	if (c->count == 0)
-		return 1.0;// No curve - constant 1
+		// No curve -> constant 1
+		return 1.0;
 	x = x * GRAPH_WIDTH;
 	int index = gdkpoint_bisect(x, c->user_points, c->count);
 	// constant extrapolation
@@ -493,7 +524,7 @@ float curve_get_value(float x, Curve *c)
 		return curve_interpolate(x, index-1, index, c);
 }
 
-// update curve parts to the left and to the right of given point
+// Update curve parts to the left and to the right of given point
 void curve_update_part(int index, Curve *c){
 	if (index > 0)
 		for (int i=c->user_points[index-1].x; i<c->user_points[index].x; i++){
@@ -513,7 +544,7 @@ void curve_update_part(int index, Curve *c){
 		}
 }
 
-// insert a point into the curve
+// Insert a point into the curve
 int curve_add_point(int x, int y, Curve *c)
 {
 	// get neighbors' positions (if any)
@@ -528,7 +559,7 @@ int curve_add_point(int x, int y, Curve *c)
 	return index;
 }
 
-// remove a point from the curve
+// Remove a point from the curve
 void curve_remove_point(int index, Curve *c)
 {
 	c->count -= 1;
@@ -539,16 +570,18 @@ void curve_remove_point(int index, Curve *c)
 	curve_update_part(index, c);
 }
 
-// move a point to another position
+// Move a point to another position
 int curve_move_point(int index, int x, int y, Curve *c)
 {
 	int new_index = index;
 	// fix order
-	while (new_index+1 < c->count && c->user_points[new_index+1].x < x){
+	while (new_index+1 < c->count && c->user_points[new_index+1].x < x)
+	{
 		c->user_points[new_index] = c->user_points[new_index+1];
 		new_index ++;
 	}
-	while (new_index > 0 && c->user_points[new_index-1].x > x){
+	while (new_index > 0 && c->user_points[new_index-1].x > x)
+	{
 		c->user_points[new_index] = c->user_points[new_index-1];
 		new_index --;
 	}
@@ -580,19 +613,19 @@ static gint graph_events (GtkWidget *widget, GdkEvent *event, PluginData *pd)
 	{
 		// Button press: add or grab a point
 		index = gdkpoint_bisect(tx, pd->curve_user.user_points, pd->curve_user.count);
-		if (index < pd->curve_user.count){
+		if (index < pd->curve_user.count)
+		{
 			dist = pd->curve_user.user_points[index].x - tx;
 		}
-		if (index > 0 && tx - pd->curve_user.user_points[index-1].x < dist) {
+		if (index > 0 && tx - pd->curve_user.user_points[index-1].x < dist)
+		{
 			index -= 1;
 			dist = tx - pd->curve_user.user_points[index].x;
 		}
-		if (dist <= GRAPH_HOTSPOT || pd->curve_user.count == USER_POINT_COUNT){
+		if (dist <= GRAPH_HOTSPOT || pd->curve_user.count == USER_POINT_COUNT)
 			pd->point_grabbed = curve_move_point(index, tx, ty, &pd->curve_user);
-		}
-		else {
+		else 
 			pd->point_grabbed = curve_add_point(tx, ty, &pd->curve_user);
-		}
 		pd->curve_user_changed = TRUE;
 		graph_redraw (pd);
 		gimp_preview_invalidate(GIMP_PREVIEW(pd->preview));
@@ -602,21 +635,17 @@ static gint graph_events (GtkWidget *widget, GdkEvent *event, PluginData *pd)
 	{
 		// Button release: move a point and remove it if requested
 		if (pd->point_grabbed >= 0) {
-			if (tx < 0 && pd->point_grabbed > 0) { // if point is not first, remove it
+			if (tx < 0 && pd->point_grabbed > 0) // if point is not first, remove it
 				curve_remove_point(pd->point_grabbed, &pd->curve_user);
-			}
-			else if (tx >= GRAPH_WIDTH && pd->point_grabbed+1 < pd->curve_user.count){ // if point is not last, remove it
+			else if (tx >= GRAPH_WIDTH && pd->point_grabbed+1 < pd->curve_user.count) // if point is not last, remove it
 				curve_remove_point(pd->point_grabbed, &pd->curve_user);
-			}
-			else {
+			else
 				curve_move_point(pd->point_grabbed, CLAMPED(tx, 0,GRAPH_WIDTH-1), CLAMPED(ty, 0,GRAPH_HEIGHT-1), &pd->curve_user);
-			}
 			pd->point_grabbed = -1;
 			pd->curve_user_changed = TRUE;
 			graph_redraw (pd);
-			if (pd->do_preview_hd){
+			if (pd->do_preview_hd)
 				preview_hd(NULL, pd);
-			}
 			gimp_preview_invalidate(GIMP_PREVIEW(pd->preview));
 		}
 	}
@@ -741,9 +770,9 @@ gboolean dialog(PluginData *pd)
 	fft_prepare(pd);
 	histogram_generate(pd);
 	wavelet_prepare(pd);
-	wavelet_preview(pd);
 	gboolean run = (gimp_dialog_run (GIMP_DIALOG (dialog)) == GTK_RESPONSE_OK);
-	if (run) {
+	if (run)
+	{
 		// set the region mode to actual writing
 		gimp_pixel_rgn_init(&pd->region, pd->drawable, 0, 0, pd->image_width, pd->image_height, TRUE, TRUE);
 		fft_apply(pd);
@@ -791,11 +820,7 @@ void query(void)
 
 // Run the plugin
 static void
-run (const gchar      *name,
-     gint              nparams,
-     const GimpParam  *param,
-     gint             *nreturn_vals,
-     GimpParam       **return_vals)
+run (const gchar *name, gint nparams, const GimpParam *param, gint *nreturn_vals, GimpParam **return_vals)
 {
 	// Return values
   static GimpParam values[1];
@@ -829,11 +854,16 @@ run (const gchar      *name,
 
 	if (run_mode == GIMP_RUN_INTERACTIVE)
 	{
+		// Interactive call with dialog
 		dialog(&pd);
-		gimp_set_data (PLUG_IN_BINARY, pd.curve_user.user_points, sizeof (GdkPoint) * pd.curve_user.count);
+		if (pd.curve_user.count > 0)
+		{
+			gimp_set_data (PLUG_IN_BINARY, pd.curve_user.user_points, sizeof (GdkPoint) * pd.curve_user.count);
+		}
 	}
 	else if (run_mode == GIMP_RUN_WITH_LAST_VALS)
 	{
+		// Read a saved curve and apply it
 		fft_prepare(&pd);
 		gimp_get_data(PLUG_IN_BINARY, pd.curve_user.user_points);
 		pd.curve_user.count = gimp_get_data_size(PLUG_IN_BINARY) / sizeof (GdkPoint);
