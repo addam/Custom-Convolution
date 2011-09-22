@@ -41,7 +41,7 @@ typedef struct PluginData {
 	gint              selection_offset_x, selection_offset_y, selection_width, selection_height;
 	gint              channel_count;
 	fftwf_complex   **image_freq; // array of pointers to image for each channel, frequency domain
-	short            *image_wavelet; // an array of wavelet images: y->x->scale
+	char             *image_wavelet; // an array of wavelet images: y->x->scale
 	float           **image;  // same as above, image domain
 	guchar           *img_pixels; // array used for transfering data from/to GIMP
 	fftwf_plan        plan;
@@ -205,7 +205,7 @@ void wavelet_prepare(PluginData *pd)
 	fftwf_complex *multiplied = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * pw * h);
 	float *image_temp = (float*)fftwf_malloc(sizeof(float) * w * h);
 	float diagonal = sqrt(h*h + w*w)/2;
-	pd->image_wavelet = (short*)fftwf_malloc(WAVELET_DEPTH * w * h * sizeof(short));
+	pd->image_wavelet = (char*)fftwf_malloc(WAVELET_DEPTH * w * h * sizeof(char));
 	// printf("Wavelet layers occupy %lu MB.\n", (WAVELET_DEPTH * w * h * sizeof(short)) >> 20);
 	// TODO: keep only the selected part of the image (->save memory)
 
@@ -248,7 +248,7 @@ void wavelet_prepare(PluginData *pd)
 		fftwf_execute_dft_c2r(pd->plan, multiplied, image_temp);
 		for (int i=0; i < w*h; i++)
 		{
-			pd->image_wavelet[i*WAVELET_DEPTH + scale] = CLAMPED(image_temp[i], SHRT_MIN, SHRT_MAX);
+			pd->image_wavelet[i*WAVELET_DEPTH + scale] = CLAMPED(image_temp[i], -127, 127);
 		}
 		lower = peak;
 		peak = upper;
@@ -276,7 +276,7 @@ void wavelet_apply(PluginData *pd, int out_x, int out_y, int out_w, int out_h)
 		{
 			for (int x=0; x<out_w; x++)
 			{
-				short *pixel_wavelets = pd->image_wavelet + WAVELET_DEPTH*((y+out_y)*w +(x+out_x));
+				char *pixel_wavelets = pd->image_wavelet + WAVELET_DEPTH*((y+out_y)*w +(x+out_x));
 				// calculate needed brightness change (per channel)
 				float diff = 0; 
 				for (int scale=0; scale<WAVELET_DEPTH; scale ++)
