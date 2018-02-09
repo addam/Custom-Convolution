@@ -558,7 +558,8 @@ int curve_move_point(int index, int x, int y, Curve *c)
 static gint graph_events(GtkWidget *widget, GdkEvent *event, PluginData *pd)
 {
 	static GdkCursorType cursor_type = GDK_TOP_LEFT_ARROW;
-	int tx, ty, index, dist;
+	int tx, ty, index;
+	int dist = GRAPH_HOTSPOT + 1;
 	gdk_window_get_pointer(pd->graph->window, &tx, &ty, NULL);
 	if (event->type == GDK_EXPOSE) {
 		if (pd->graph_pixmap == NULL) {
