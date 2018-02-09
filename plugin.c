@@ -1,10 +1,3 @@
-/*
-Compile using GCC:
-gcc -std=c99 -O2 $(pkg-config fftw3f gimp-2.0 gimpui-2.0 gtk+-2.0 --libs --cflags) -o gimp-frequency-curves plugin.c  
-Install into gimp:
-gimptool-2.0 --install-bin gimp-frequency-curves
-*/
-
 #include <stdlib.h>
 #include <math.h>
 #include <limits.h>
@@ -13,7 +6,7 @@ gimptool-2.0 --install-bin gimp-frequency-curves
 #include <libgimp/gimpui.h>
 #include <fftw3.h>
 
-#define CLAMPED(x,l,r) (((x)<(l))?(l):(((x)>(r))?(r):(x)))
+#define CLAMPED(x, l, r) (((x)<(l))?(l):(((x)>(r))?(r):(x)))
 
 #define PLUG_IN_NAME "plug_in_frequency_curves"
 #define PLUG_IN_BINARY "gimp-frequency-curves"
@@ -34,27 +27,27 @@ typedef struct _Curve {
 } Curve;
 
 typedef struct PluginData {
-  GimpDrawable      *drawable;
-  GimpPixelRgn       region;
+	GimpDrawable *drawable;
+	GimpPixelRgn region;
 
-	gint              image_width, image_height;
-	gint              selection_offset_x, selection_offset_y, selection_width, selection_height;
-	gint              channel_count;
-	fftwf_complex   **image_freq; // array of pointers to image for each channel, frequency domain
-	char             *image_wavelet; // an array of wavelet images: y->x->scale
-	float           **image;  // same as above, image domain
-	guchar           *img_pixels; // array used for transfering data from/to GIMP
-	fftwf_plan        plan;
+	gint image_width, image_height;
+	gint selection_offset_x, selection_offset_y, selection_width, selection_height;
+	gint channel_count;
+	fftwf_complex **image_freq; // array of pointers to image for each channel, frequency domain
+	char *image_wavelet; // an array of wavelet images: y->x->scale
+	float **image;  // same as above, image domain
+	guchar *img_pixels; // array used for transfering data from/to GIMP
+	fftwf_plan plan;
 
-	Curve             curve_user, curve_fft;
-	gboolean          curve_user_changed;
-	GtkWidget        *graph;
-	float             histogram[GRAPH_WIDTH];
-	int               point_grabbed;
-	GdkPixmap        *graph_pixmap;
+	Curve curve_user, curve_fft;
+	gboolean curve_user_changed;
+	GtkWidget *graph;
+	float histogram[GRAPH_WIDTH];
+	int point_grabbed;
+	GdkPixmap *graph_pixmap;
 	
-	GtkWidget        *preview;
-	gboolean          do_preview_hd;
+	GtkWidget *preview;
+	gboolean do_preview_hd;
 } PluginData;
 
 // Image processing
@@ -93,28 +86,24 @@ gint preview_invalidated(PluginData *pd, GtkWidget *preview); // For any whateve
 gboolean dialog(PluginData *pd); // Create and handle the plugin's dialog
 
 static void query(void);
-static void run (const gchar      *name,
-                 gint              nparams,
-                 const GimpParam  *param,
-                 gint             *nreturn_vals,
-                 GimpParam       **return_vals);
+static void run(const gchar *name, gint nparams, const GimpParam *param, gint *nreturn_vals, GimpParam **return_vals);
 
 GimpPlugInInfo PLUG_IN_INFO = {NULL, NULL, query, run};
 
 void fft_prepare(PluginData *pd)
 {
-	gint         w = pd->image_width, h = pd->image_height;
-	gint         channel_count = pd->channel_count;
-	int          x, y;
-	float      **image;
-	guchar      *img_pixels;
-	float        norm;
+	gint w = pd->image_width, h = pd->image_height;
+	gint channel_count = pd->channel_count;
+	int x, y;
+	float **image;
+	guchar *img_pixels;
+	float norm;
 	image = pd->image = (float**) malloc(sizeof(float*) * channel_count);
 	pd->image_freq = (fftwf_complex**) malloc(sizeof(fftwf_complex*) * channel_count);
-  img_pixels = pd->img_pixels = g_new (guchar, w * h * channel_count);
-  //allocate an array for each channel
-  for (int channel = 0; channel < channel_count; channel ++){
-	  image[channel] = (float*) fftwf_malloc(sizeof(float) * w * h);
+	img_pixels = pd->img_pixels = g_new (guchar, w * h * channel_count);
+	//allocate an array for each channel
+	for (int channel = 0; channel < channel_count; channel ++) {
+		image[channel] = (float*) fftwf_malloc(sizeof(float) * w * h);
 		pd->image_freq[channel] = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * (w/2+1) * h);
 	}
 	// printf("Image data occupies %lu MB.\n", (sizeof(float) * w * h * channel_count) >> 20);
@@ -133,42 +122,37 @@ void fft_prepare(PluginData *pd)
 	int pw = w/2+1; // physical width
 	float diagonal = sqrt(h*h + w*w)/2.0;
 	norm = 1.0/(w*h);
-	for(int channel=0; channel<channel_count; channel++)
-	{
+	for (int channel=0; channel<channel_count; channel++) {
 		// convert one color channel to float[]
-		for(int i=0; i < w*h; i ++)
-		{
+		for (int i=0; i < w*h; i ++) {
 			 image[channel][i] =  (float) img_pixels[(i)*channel_count + channel] * norm;
 		}
 		// transform the channel
 		fftwf_execute_dft_r2c(plan, image[channel], pd->image_freq[channel]);
-		for(int i=0; i < w*h; i ++)
-		{
+		for (int i=0; i < w*h; i ++) {
 			 image[channel][i] =  (float) img_pixels[(i)*channel_count + channel] * norm;
 		}
 		// copy the channel again, for preview
-		for(int i=0; i < w*h; i ++)
-		{
+		for (int i=0; i < w*h; i ++) {
 			 image[channel][i] =  (float) img_pixels[(i)*channel_count + channel];
 		}
 	}
 	fftwf_destroy_plan(plan);
 }
+
 void fft_apply(PluginData *pd)
 {
-	int w = pd->image_width, h = pd->image_height,
-		pw = w/2+1; // physical width
+	int w = pd->image_width, h = pd->image_height, pw = w/2+1; // physical width
 	fftwf_complex *multiplied = (fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex) * pw * h);
 	float diagonal = sqrt(h*h + w*w)/2.0;
 	// save current state of the curve
 	curve_copy(&pd->curve_user, &pd->curve_fft);
-	for(int channel=0; channel < pd->channel_count; channel++)
-	{
+	for (int channel=0; channel < pd->channel_count; channel++) {
 		//skip DC value
 		multiplied[0][0] = pd->image_freq[channel][0][0];
 		multiplied[0][1] = pd->image_freq[channel][0][1];
 		// apply convolution
-		for (int i=1; i < pw*h; i++){
+		for (int i=1; i < pw*h; i++) {
 			float dist = index_to_dist(i, pw, h);
 			float coef = curve_get_value(dist_to_graph(dist), &pd->curve_fft);
 			multiplied[i][0] = pd->image_freq[channel][i][0] * coef;
@@ -177,27 +161,27 @@ void fft_apply(PluginData *pd)
 		// apply inverse FFT
 		fftwf_execute_dft_c2r(pd->plan, multiplied, pd->image[channel]);
 		// pack results for GIMP
-		for(int x=0; x < w; x ++)
-		{
-			for(int y=0; y < h; y ++)
-			{
+		for (int x=0; x < w; x ++) {
+			for (int y=0; y < h; y ++) {
 				float v = pd->image[channel][y*w + x];
-				pd->img_pixels[(y*w + x)*pd->channel_count + channel] = CLAMPED(v,0,255);
+				pd->img_pixels[(y*w + x)*pd->channel_count + channel] = CLAMPED(v, 0, 255);
 			}
 		}
 	}
 	fftwf_free(multiplied);
 }
+
 void fft_destroy(PluginData *pd)
 {
 	fftwf_destroy_plan(pd->plan);
-	for (int i=0; i<pd->channel_count; i++){
+	for (int i=0; i<pd->channel_count; i++) {
 		fftwf_free(pd->image[i]);
 		fftwf_free(pd->image_freq[i]);
 	}
 	free(pd->image);
 	free(pd->image_freq);
 }
+
 void wavelet_prepare(PluginData *pd)
 {
 	int w = pd->image_width, h = pd->image_height,
@@ -210,30 +194,25 @@ void wavelet_prepare(PluginData *pd)
 	// TODO: keep only the selected part of the image (->save memory)
 
 	int lower = 0, peak = 1, upper = scale_to_dist(1, diagonal);
-	for (int scale = 0; scale < WAVELET_DEPTH; scale ++)
-	{
+	for (int scale = 0; scale < WAVELET_DEPTH; scale ++) {
 		float above = upper-peak, below = peak-lower;
-		for (int i=0; i < pw*h; i++){
+		for (int i=0; i < pw*h; i++) {
 			multiplied[i][0] = multiplied[i][1] = 0.0;
 		}
-		for (int i=0; i < pw*h; i++)
-		{
+		for (int i=0; i < pw*h; i++) {
 			float dist = index_to_dist(i, pw, h);
-			if (dist <= upper){
-				if (dist > lower){
-					if (dist > peak){
-						for(int channel=0; channel < pd->channel_count; channel ++)
-						{
+			if (dist <= upper) {
+				if (dist > lower) {
+					if (dist > peak) {
+						for (int channel=0; channel < pd->channel_count; channel ++) {
 							multiplied[i][0] += pd->image_freq[channel][i][0];
 							multiplied[i][1] += pd->image_freq[channel][i][1];
 						}
 						float coef = (1.0 - (dist-peak)/above) / pd->channel_count;
 						multiplied[i][0] *= coef;
 						multiplied[i][1] *= coef;
-					}
-					else {
-						for(int channel=0; channel < pd->channel_count; channel ++)
-						{
+					} else {
+						for (int channel=0; channel < pd->channel_count; channel ++) {
 							multiplied[i][0] += pd->image_freq[channel][i][0];
 							multiplied[i][1] += pd->image_freq[channel][i][1];
 						}
@@ -246,8 +225,7 @@ void wavelet_prepare(PluginData *pd)
 		}
 		// apply inverse FFT
 		fftwf_execute_dft_c2r(pd->plan, multiplied, image_temp);
-		for (int i=0; i < w*h; i++)
-		{
+		for (int i=0; i < w*h; i++) {
 			pd->image_wavelet[i*WAVELET_DEPTH + scale] = CLAMPED(image_temp[i], -127, 127);
 		}
 		lower = peak;
@@ -257,89 +235,73 @@ void wavelet_prepare(PluginData *pd)
 	fftwf_free(multiplied);
 	fftwf_free(image_temp);
 }
+
 void wavelet_apply(PluginData *pd, int out_x, int out_y, int out_w, int out_h)
 {
 	int w = pd->image_width, h = pd->image_height;
-	if (pd->curve_user_changed)
-	{
+	if (pd->curve_user_changed) {
 		// estimate needed coefficient for each wavelet layer
 		// (TODO: integrate)
 		float coef[WAVELET_DEPTH];
 		float diagonal = sqrt(h*h + w*w)/2;
-		for (int scale=0; scale<WAVELET_DEPTH; scale++)
-		{
+		for (int scale=0; scale<WAVELET_DEPTH; scale++) {
 			float x = dist_to_graph(scale_to_dist(scale, diagonal));
 			coef[scale] = curve_get_value(x, &pd->curve_user) - curve_get_value(x, &pd->curve_fft);
 		}
 		// combine wavelet layers
-		for (int y=0; y<out_h; y++)
-		{
-			for (int x=0; x<out_w; x++)
-			{
+		for (int y=0; y<out_h; y++) {
+			for (int x=0; x<out_w; x++) {
 				char *pixel_wavelets = pd->image_wavelet + WAVELET_DEPTH*((y+out_y)*w +(x+out_x));
 				// calculate needed brightness change (per channel)
 				float diff = 0; 
-				for (int scale=0; scale<WAVELET_DEPTH; scale ++)
-				{
+				for (int scale=0; scale<WAVELET_DEPTH; scale ++) {
 					diff += pixel_wavelets[scale] * coef[scale];
 				}
-				if (diff < 0)
-				{
+				if (diff < 0) {
 					// darken the pixel: multiply all channels (to keep its hue)
 					float value = 0; // current value of the pixel
-					for (int channel = 0; channel < pd->channel_count; channel ++)
-					{
+					for (int channel = 0; channel < pd->channel_count; channel ++) {
 						value += pd->image[channel][(y+out_y)*w+(x+out_x)];
 					}
 					value = value/pd->channel_count;
-					for (int channel = 0; channel < pd->channel_count; channel ++)
-					{
+					for (int channel = 0; channel < pd->channel_count; channel ++) {
 						pd->img_pixels[(y*out_w+x)*pd->channel_count + channel] = CLAMPED(pd->image[channel][(y+out_y)*w+(x+out_x)] * (1 + diff/value), 0, 255);
 					}
-				}
-				else
-				{
+				} else {
 					// brighten the pixel: add value to all channels
-					for (int channel = 0; channel < pd->channel_count; channel ++)
-					{
+					for (int channel = 0; channel < pd->channel_count; channel ++) {
 						pd->img_pixels[(y*out_w+x)*pd->channel_count + channel] = CLAMPED(pd->image[channel][(y+out_y)*w+(x+out_x)] + diff, 0, 255);
 					}
 				}
 			}
 		}
-	}
-	else
-	{
+	} else {
 		// direct copy
-		for (int y=0; y<out_h; y++)
-		{
-			for (int x=0; x<out_w; x++)
-			{
-				for (int channel=0; channel < pd->channel_count; channel ++)
-				{
+		for (int y=0; y<out_h; y++) {
+			for (int x=0; x<out_w; x++) {
+				for (int channel=0; channel < pd->channel_count; channel ++) {
 					pd->img_pixels[(y*out_w+x)*pd->channel_count + channel] = CLAMPED(pd->image[channel][(y+out_y)*w+(x+out_x)], 0, 255);
 				}
 			}
 		}
 	}
 }
+
 void wavelet_destroy(PluginData *pd)
 {
 	fftwf_free(pd->image_wavelet);
 }
+
 // Generate a histogram from FFT data
 void histogram_generate(PluginData *pd)
 {
 	int pw = pd->image_width/2+1, h = pd->image_height;
-	for (int i=0; i<GRAPH_WIDTH; i++)
-	{
+	for (int i=0; i<GRAPH_WIDTH; i++) {
 		pd->histogram[i] = 0;
 	}
-	for(int channel=0; channel<pd->channel_count; channel++)
-	{
+	for(int channel=0; channel<pd->channel_count; channel++) {
 		// add value to histogram
-		for(int i=0; i<pw*h; i++)
-		{
+		for(int i=0; i<pw*h; i++) {
 			float *pixel = (float*)(pd->image_freq[channel] + i);
 			float val = sqrt(pixel[0]*pixel[0] + pixel[1]*pixel[1]);
 			float dist = index_to_dist(i, pw, h);
@@ -348,15 +310,13 @@ void histogram_generate(PluginData *pd)
 	}
 	// remap histogram values
 	float histogram_max = 0;
-	for (int i=0; i<GRAPH_WIDTH; i++)
-	{
+	for (int i=0; i<GRAPH_WIDTH; i++) {
 		pd->histogram[i] = log(pd->histogram[i]+1.0);
 		if (pd->histogram[i] > histogram_max)
 			histogram_max = pd->histogram[i];
 	}
 	histogram_max = 1.0/histogram_max;
-	for (int i=0; i<GRAPH_WIDTH; i++)
-	{
+	for (int i=0; i<GRAPH_WIDTH; i++) {
 		pd->histogram[i] *= histogram_max;
 	}
 }
@@ -365,81 +325,78 @@ void graph_redraw(PluginData *pd)
 {
 	GtkStyle *graph_style = gtk_widget_get_style (pd->graph);
 	// clear the pixmap
-	gdk_draw_rectangle (pd->graph_pixmap, graph_style->light_gc[GTK_STATE_NORMAL],
-											TRUE, 0, 0, GRAPH_WIDTH, GRAPH_HEIGHT);
-	
+	gdk_draw_rectangle (pd->graph_pixmap, graph_style->light_gc[GTK_STATE_NORMAL], TRUE, 0, 0, GRAPH_WIDTH, GRAPH_HEIGHT);
 	// histogram
-	for (int i=0; i<GRAPH_WIDTH; i++)
-	{
-		gdk_draw_line (pd->graph_pixmap, graph_style->mid_gc[GTK_STATE_NORMAL], i, GRAPH_HEIGHT * (1.0-pd->histogram[i]), i, GRAPH_HEIGHT);
+	for (int i=0; i<GRAPH_WIDTH; i++) {
+		gdk_draw_line(pd->graph_pixmap, graph_style->mid_gc[GTK_STATE_NORMAL], i, GRAPH_HEIGHT * (1.0-pd->histogram[i]), i, GRAPH_HEIGHT);
 	}
 	// horizontal lines
-	gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], 0, GRAPH_HEIGHT-1, GRAPH_WIDTH, GRAPH_HEIGHT-1);
-	for (int i = 1; i < 10; i++)
-	{
+	gdk_draw_line(pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], 0, GRAPH_HEIGHT-1, GRAPH_WIDTH, GRAPH_HEIGHT-1);
+	for (int i = 1; i < 10; i++) {
 		int y = value_to_graph(i/2.0);
-		gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], 0, y, GRAPH_WIDTH, y);
+		gdk_draw_line(pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], 0, y, GRAPH_WIDTH, y);
 	}
-	gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], 0, 0, GRAPH_WIDTH, 0);
+	gdk_draw_line(pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], 0, 0, GRAPH_WIDTH, 0);
 	// vertical lines
-	for (int i = 0; i < 10; i++)
-	{
+	for (int i = 0; i < 10; i++) {
 		int x = dist_to_graph(i)*GRAPH_WIDTH;
-		gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], x, 0, x, GRAPH_HEIGHT);
+		gdk_draw_line(pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], x, 0, x, GRAPH_HEIGHT);
 		x = dist_to_graph(10*i)*GRAPH_WIDTH;
-		gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], x, 0, x, GRAPH_HEIGHT);
+		gdk_draw_line(pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], x, 0, x, GRAPH_HEIGHT);
 	}
-	gdk_draw_line (pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], GRAPH_WIDTH-1, 0, GRAPH_WIDTH-1, GRAPH_HEIGHT);
+	gdk_draw_line(pd->graph_pixmap, graph_style->dark_gc[GTK_STATE_NORMAL], GRAPH_WIDTH-1, 0, GRAPH_WIDTH-1, GRAPH_HEIGHT);
 	// wavelet marks
 	float diagonal = sqrt(pd->image_width*pd->image_width + pd->image_height*pd->image_height)/2;
-	for (int i = 0; i < WAVELET_DEPTH; i++)
-	{
+	for (int i = 0; i < WAVELET_DEPTH; i++) {
 		int x = CLAMPED(dist_to_graph(scale_to_dist(i, diagonal))*GRAPH_WIDTH, 0, GRAPH_WIDTH-1);
-		gdk_draw_line (pd->graph_pixmap, graph_style->text_gc[GTK_STATE_NORMAL], x, GRAPH_HEIGHT/2 - 2, x, GRAPH_HEIGHT/2 + 2);
+		gdk_draw_line(pd->graph_pixmap, graph_style->text_gc[GTK_STATE_NORMAL], x, GRAPH_HEIGHT/2 - 2, x, GRAPH_HEIGHT/2 + 2);
 	}
 	// user curve
 	gdk_draw_lines (pd->graph_pixmap, graph_style->text_gc[GTK_STATE_NORMAL], pd->curve_user.points, GRAPH_WIDTH);
 	// user points
-	for (int i = 0; i < pd->curve_user.count; i++)
-	{
+	for (int i = 0; i < pd->curve_user.count; i++) {
 		gdk_draw_arc(pd->graph_pixmap, graph_style->text_gc[GTK_STATE_NORMAL], FALSE, pd->curve_user.user_points[i].x-GRAPH_HOTSPOT-1, pd->curve_user.user_points[i].y-GRAPH_HOTSPOT-1, GRAPH_HOTSPOT*2+1, GRAPH_HOTSPOT*2+1, 0, 64*360);
 	}
 	gdk_draw_drawable (pd->graph->window, graph_style->text_gc[GTK_STATE_NORMAL], pd->graph_pixmap, 0, 0, 0, 0, GRAPH_WIDTH, GRAPH_HEIGHT);
 }
 
-void curve_init(Curve *c){
+void curve_init(Curve *c)
+{
 	c->count = 0;
-	for (int i=0; i<GRAPH_WIDTH; i++)
-	{
+	for (int i=0; i<GRAPH_WIDTH; i++) {
 		c->points[i].x = i;
 		c->points[i].y = GRAPH_HEIGHT/2;
 	}
 }
-void curve_copy(Curve *src, Curve *dest){
+
+void curve_copy(Curve *src, Curve *dest)
+{
 	dest->count = src->count;
-	for (int i=0; i<src->count; i++)
-	{
+	for (int i=0; i<src->count; i++) {
 		dest->user_points[i] = src->user_points[i];
 	}
-	for (int i=0; i<GRAPH_WIDTH; i++)
-	{
+	for (int i=0; i<GRAPH_WIDTH; i++) {
 		dest->points[i] = src->points[i];
 	}
 }
+
 // Wavelet scale -> frequency magnitude (unnormalized)
-int scale_to_dist(int scale, int diagonal){
-	if (scale >= WAVELET_DEPTH-1 || 1UL<<(scale+2) > diagonal)
+int scale_to_dist(int scale, int diagonal)
+{
+	if (scale >= WAVELET_DEPTH-1 || 1UL<<(scale+2) > diagonal) {
 		return diagonal;
-	else
+	} else {
 		return 1UL<<(scale+2);
+	}
 }
+
 // FFT array index -> frequency magnitude (unnormalized)
 float index_to_dist(int index, int width, int height)
 {
 	int x, y;
 	x = index % width;
 	y = index / width;
-	if (y > height/2){
+	if (y > height/2) {
 		y = y-height;
 	}
 	return sqrt(x*x + y*y);
@@ -465,21 +422,23 @@ float graph_to_dist(float x)
 // Actual curve value -> graph y coordinate (unnormalized)
 int value_to_graph(float val)
 {
-	if (val<1)
+	if (val<1) {
 		return GRAPH_HEIGHT*(1.0-val/2);
-	else
+	} else {
 		return GRAPH_HEIGHT/(2*val);
+	}
 }
 
 // Graph y coordinate (unnormalized) -> curve value
 float graph_to_value(int y)
 {
-	if (y > GRAPH_HEIGHT/2)
+	if (y > GRAPH_HEIGHT/2) {
 		return (GRAPH_HEIGHT - y - 1) / (float)(GRAPH_HEIGHT/2.0);
-	else if (y>0)
+	} else if (y > 0) {
 		return (GRAPH_HEIGHT/2.0) / (float) y;
-	else
+	} else {
 		return GRAPH_HEIGHT/2.0;
+	}
 }
 
 // Interpolate the curve at a given point between two points with indices i1, i2 (normalized)
@@ -495,13 +454,13 @@ float curve_interpolate(float x, int i1, int i2, Curve *c)
 int gdkpoint_bisect (int item, GdkPoint *array, int count)
 {
 	int left = 0, right = count;
-	while (left != right)
-	{
+	while (left < right) {
 		int test = (left+right)/2;
-		if (array[test].x > item)
+		if (array[test].x > item) {
 			right = test;
-		else
+		} else {
 			left = test+1;
+		}
 	}
 	return left;
 }
@@ -509,39 +468,42 @@ int gdkpoint_bisect (int item, GdkPoint *array, int count)
 // Interpolate the curve at an arbitrary point in range [0; 1]
 float curve_get_value(float x, Curve *c)
 {
-	if (c->count == 0)
+	if (c->count == 0) {
 		// No curve -> constant 1
 		return 1.0;
+	}
 	x = x * GRAPH_WIDTH;
 	int index = gdkpoint_bisect(x, c->user_points, c->count);
-	// constant extrapolation
-	if (index == c->count)
+	if (index == c->count) {
+		// constant extrapolation
 		return graph_to_value(c->user_points[index-1].y);
-	else if (index == 0)
+	} else if (index == 0) {
 		return graph_to_value(c->user_points[index].y);
-	// interpolation
-	else
+	 } else {
+		// interpolation
 		return curve_interpolate(x, index-1, index, c);
+	}
 }
 
 // Update curve parts to the left and to the right of given point
 void curve_update_part(int index, Curve *c){
-	if (index > 0)
+	if (index > 0) {
 		for (int i=c->user_points[index-1].x; i<c->user_points[index].x; i++){
 			c->points[i].y = value_to_graph(curve_interpolate(i, index-1, index, c));
 		}
-	else
+	} else {
 		for (int i=0; i<c->user_points[index].x; i++){
 			c->points[i].y = c->user_points[index].y;
 		}
-	if (index+1 < c->count)
+	} if (index+1 < c->count) {
 		for (int i=c->user_points[index+1].x; i>=c->user_points[index].x; i--){
 			c->points[i].y = value_to_graph(curve_interpolate(i, index, index+1, c));
 		}
-	else
+	} else {
 		for (int i=GRAPH_WIDTH-1; i>=c->user_points[index].x; i--){
 			c->points[i].y = c->user_points[index].y;
 		}
+	}
 }
 
 // Insert a point into the curve
@@ -550,7 +512,7 @@ int curve_add_point(int x, int y, Curve *c)
 	// get neighbors' positions (if any)
 	GdkPoint point = {x, y};
 	int i, index = gdkpoint_bisect(x, c->user_points, c->count);
-	for (i=c->count; i>index; i--){
+	for (i=c->count; i>index; i--) {
 		c->user_points[i] = c->user_points[i-1];
 	}
 	c->user_points[index] = point;
@@ -564,7 +526,7 @@ void curve_remove_point(int index, Curve *c)
 {
 	c->count -= 1;
 	int i;
-	for (i=index; i < c->count; i++){
+	for (i=index; i < c->count; i++) {
 		c->user_points[i] = c->user_points[i+1];
 	}
 	curve_update_part(index, c);
@@ -575,13 +537,11 @@ int curve_move_point(int index, int x, int y, Curve *c)
 {
 	int new_index = index;
 	// fix order
-	while (new_index+1 < c->count && c->user_points[new_index+1].x < x)
-	{
+	while (new_index+1 < c->count && c->user_points[new_index+1].x < x) {
 		c->user_points[new_index] = c->user_points[new_index+1];
 		new_index ++;
 	}
-	while (new_index > 0 && c->user_points[new_index-1].x > x)
-	{
+	while (new_index > 0 && c->user_points[new_index-1].x > x) {
 		c->user_points[new_index] = c->user_points[new_index-1];
 		new_index --;
 	}
@@ -595,72 +555,61 @@ int curve_move_point(int index, int x, int y, Curve *c)
 }
 
 // GTK event handler for the graph widget
-static gint graph_events (GtkWidget *widget, GdkEvent *event, PluginData *pd)
+static gint graph_events(GtkWidget *widget, GdkEvent *event, PluginData *pd)
 {
-  static GdkCursorType cursor_type = GDK_TOP_LEFT_ARROW;
-  int tx, ty, index, dist;
-
-  gdk_window_get_pointer (pd->graph->window, &tx, &ty, NULL);
-	
-	if (event->type == GDK_EXPOSE)
-	{
-		if (pd->graph_pixmap == NULL)
-			pd->graph_pixmap = gdk_pixmap_new (pd->graph->window, GRAPH_WIDTH, GRAPH_HEIGHT, -1);
-		graph_redraw (pd);
-	}	
-	
-	else if (event->type == GDK_BUTTON_PRESS)
-	{
+	static GdkCursorType cursor_type = GDK_TOP_LEFT_ARROW;
+	int tx, ty, index, dist;
+	gdk_window_get_pointer(pd->graph->window, &tx, &ty, NULL);
+	if (event->type == GDK_EXPOSE) {
+		if (pd->graph_pixmap == NULL) {
+			pd->graph_pixmap = gdk_pixmap_new(pd->graph->window, GRAPH_WIDTH, GRAPH_HEIGHT, -1);
+		}
+		graph_redraw(pd);
+	} else if (event->type == GDK_BUTTON_PRESS) {
 		// Button press: add or grab a point
 		index = gdkpoint_bisect(tx, pd->curve_user.user_points, pd->curve_user.count);
-		if (index < pd->curve_user.count)
-		{
+		if (index < pd->curve_user.count) {
 			dist = pd->curve_user.user_points[index].x - tx;
 		}
-		if (index > 0 && tx - pd->curve_user.user_points[index-1].x < dist)
-		{
+		if (index > 0 && tx - pd->curve_user.user_points[index-1].x < dist) {
 			index -= 1;
 			dist = tx - pd->curve_user.user_points[index].x;
 		}
-		if (dist <= GRAPH_HOTSPOT || pd->curve_user.count == USER_POINT_COUNT)
+		if (dist <= GRAPH_HOTSPOT || pd->curve_user.count == USER_POINT_COUNT) {
 			pd->point_grabbed = curve_move_point(index, tx, ty, &pd->curve_user);
-		else 
+		} else {			
 			pd->point_grabbed = curve_add_point(tx, ty, &pd->curve_user);
+		}
 		pd->curve_user_changed = TRUE;
-		graph_redraw (pd);
+		graph_redraw(pd);
 		gimp_preview_invalidate(GIMP_PREVIEW(pd->preview));
-	}
-		
-	else if (event->type == GDK_BUTTON_RELEASE)
-	{
+	} else if (event->type == GDK_BUTTON_RELEASE) {
 		// Button release: move a point and remove it if requested
 		if (pd->point_grabbed >= 0) {
-			if (tx < 0 && pd->point_grabbed > 0) // if point is not first, remove it
+			if (tx < 0 && pd->point_grabbed > 0) {// if point is not first, remove it
 				curve_remove_point(pd->point_grabbed, &pd->curve_user);
-			else if (tx >= GRAPH_WIDTH && pd->point_grabbed+1 < pd->curve_user.count) // if point is not last, remove it
+			} else if (tx >= GRAPH_WIDTH && pd->point_grabbed+1 < pd->curve_user.count) {// if point is not last, remove it
 				curve_remove_point(pd->point_grabbed, &pd->curve_user);
-			else
-				curve_move_point(pd->point_grabbed, CLAMPED(tx, 0,GRAPH_WIDTH-1), CLAMPED(ty, 0,GRAPH_HEIGHT-1), &pd->curve_user);
+			} else {
+				curve_move_point(pd->point_grabbed, CLAMPED(tx, 0, GRAPH_WIDTH-1), CLAMPED(ty, 0, GRAPH_HEIGHT-1), &pd->curve_user);
+			}
 			pd->point_grabbed = -1;
 			pd->curve_user_changed = TRUE;
 			graph_redraw (pd);
-			if (pd->do_preview_hd)
+			if (pd->do_preview_hd) {
 				preview_hd(NULL, pd);
+			}
 			gimp_preview_invalidate(GIMP_PREVIEW(pd->preview));
 		}
-	}
-		
-	else if (event->type == GDK_MOTION_NOTIFY)
-	{
+	} else if (event->type == GDK_MOTION_NOTIFY) {
 		// Mouse move: move a previously grabbed point
 		if (pd->point_grabbed >= 0){
 			pd->point_grabbed = curve_move_point(pd->point_grabbed, CLAMPED(tx, 0,GRAPH_WIDTH-1), CLAMPED(ty, 0,GRAPH_HEIGHT-1), &pd->curve_user);
 			pd->curve_user_changed = TRUE;
-		  graph_redraw (pd);
+			graph_redraw (pd);
 			gimp_preview_invalidate(GIMP_PREVIEW(pd->preview));
 		}
 	}
-	
 	return FALSE;
 }
 
@@ -672,7 +621,6 @@ void wavelet_preview(PluginData *pd)
 	gimp_preview_get_size (GIMP_PREVIEW(pd->preview), &w, &h);
 	gimp_pixel_rgn_init (&pd->region, pd->drawable, 0, 0, pd->image_width, pd->image_height, FALSE, TRUE);
 	wavelet_apply(pd, x, y, w, h);
-	
 	gimp_pixel_rgn_set_rect(&pd->region, pd->img_pixels, x, y, w, h);
 	gimp_drawable_preview_draw_region(GIMP_DRAWABLE_PREVIEW(pd->preview), &pd->region);
 }
@@ -712,13 +660,7 @@ gboolean dialog(PluginData *pd)
 {
 	gimp_ui_init (PLUG_IN_BINARY, FALSE);
 	GtkWidget *dialog, *main_hbox, *hbox_buttons, *preview, *graph, *vbox, *preview_button, *preview_hd_checkbox;
-	dialog = gimp_dialog_new ("Frequency Curves", PLUG_IN_BINARY,
-														NULL, (GtkDialogFlags)0,
-														gimp_standard_help_func, PLUG_IN_NAME,
-														GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL,
-														GTK_STOCK_OK,     GTK_RESPONSE_OK,
-														NULL);
-	
+	dialog = gimp_dialog_new ("Frequency Curves", PLUG_IN_BINARY, NULL, (GtkDialogFlags)0, gimp_standard_help_func, PLUG_IN_NAME, GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL, GTK_STOCK_OK,    GTK_RESPONSE_OK, NULL);
 	main_hbox = gtk_hbox_new (FALSE, 12);
 	gtk_container_set_border_width (GTK_CONTAINER (main_hbox), 12);
 	gtk_container_add (GTK_CONTAINER(GTK_DIALOG(dialog)->vbox), main_hbox);
@@ -740,10 +682,7 @@ gboolean dialog(PluginData *pd)
 	graph = pd->graph = gtk_drawing_area_new();
 	pd->graph_pixmap = NULL;
 	gtk_widget_set_size_request (graph, GRAPH_WIDTH, GRAPH_HEIGHT);
-	gtk_widget_set_events (graph, GDK_EXPOSURE_MASK | GDK_POINTER_MOTION_MASK | 
-	                              GDK_POINTER_MOTION_HINT_MASK | GDK_ENTER_NOTIFY_MASK | 
-	                              GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | 
-	                              GDK_BUTTON1_MOTION_MASK);
+	gtk_widget_set_events (graph, GDK_EXPOSURE_MASK | GDK_POINTER_MOTION_MASK |  GDK_POINTER_MOTION_HINT_MASK | GDK_ENTER_NOTIFY_MASK |  GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK |  GDK_BUTTON1_MOTION_MASK);
 	gtk_container_add (GTK_CONTAINER (vbox), graph);
 	gtk_widget_show (graph);
 	g_signal_connect (graph, "event", G_CALLBACK (graph_events), pd);
@@ -771,8 +710,7 @@ gboolean dialog(PluginData *pd)
 	histogram_generate(pd);
 	wavelet_prepare(pd);
 	gboolean run = (gimp_dialog_run (GIMP_DIALOG (dialog)) == GTK_RESPONSE_OK);
-	if (run)
-	{
+	if (run) {
 		// set the region mode to actual writing
 		gimp_pixel_rgn_init(&pd->region, pd->drawable, 0, 0, pd->image_width, pd->image_height, TRUE, TRUE);
 		fft_apply(pd);
@@ -795,27 +733,26 @@ MAIN()
 // Register this plugin in GIMP database
 void query(void)
 {
-  // Parameters given to the plugin
-  static GimpParamDef args[] = {
-    { GIMP_PDB_INT32, (gchar *)"run_mode", (gchar *)"Interactive, non-interactive" },
-    { GIMP_PDB_IMAGE, (gchar *)"image", (gchar *)"Input image (unused)" },
-    { GIMP_PDB_DRAWABLE, (gchar *)"drawable", (gchar *)"Input drawable" }
-  };
+	// Parameters given to the plugin
+	static GimpParamDef args[] = {
+		{ GIMP_PDB_INT32, (gchar *)"run_mode", (gchar *)"Interactive, non-interactive" },
+		{ GIMP_PDB_IMAGE, (gchar *)"image", (gchar *)"Input image (unused)" },
+		{ GIMP_PDB_DRAWABLE, (gchar *)"drawable", (gchar *)"Input drawable" }
+	};
 
-  gimp_install_procedure(
-    PLUG_IN_NAME,
-    "Apply a custom convolution to the whole image",
-    "Apply a custom convolution to the whole image",
-    PLUG_IN_AUTHOR,
-    PLUG_IN_AUTHOR,
-    PLUG_IN_VERSION,
-    "Frequency Curves...",
-    "RGB*, GRAY*",
-    GIMP_PLUGIN,
-    G_N_ELEMENTS (args), 0,
-    args, NULL);
-  gimp_plugin_menu_register (PLUG_IN_NAME, "<Image>/Filters/Enhance");
-  
+	gimp_install_procedure(PLUG_IN_NAME,
+		"Apply a custom convolution to the whole image",
+		"Apply a custom convolution to the whole image",
+		PLUG_IN_AUTHOR,
+		PLUG_IN_AUTHOR,
+		PLUG_IN_VERSION,
+		"Frequency Curves...",
+		"RGB*, GRAY*",
+		GIMP_PLUGIN,
+		G_N_ELEMENTS (args), 0,
+		args, NULL);
+	gimp_plugin_menu_register (PLUG_IN_NAME, "<Image>/Filters/Enhance");
+	
 }
 
 // Run the plugin
@@ -823,46 +760,43 @@ static void
 run (const gchar *name, gint nparams, const GimpParam *param, gint *nreturn_vals, GimpParam **return_vals)
 {
 	// Return values
-  static GimpParam values[1];
+	static GimpParam values[1];
 
-  gint sel_x1, sel_y1, sel_x2, sel_y2, w, h, padding;
+	gint sel_x1, sel_y1, sel_x2, sel_y2, w, h, padding;
 	PluginData         pd;
-  GimpRunMode        run_mode;
-  GimpPDBStatusType  status = GIMP_PDB_SUCCESS;
+	GimpRunMode        run_mode;
+	GimpPDBStatusType  status = GIMP_PDB_SUCCESS;
 
-  *nreturn_vals = 1;
-  *return_vals  = values;
+	*nreturn_vals = 1;
+	*return_vals  = values;
 
-  if (param[0].type!= GIMP_PDB_INT32) 
-	  status=GIMP_PDB_CALLING_ERROR;
-  if (param[2].type!=GIMP_PDB_DRAWABLE)
-	  status=GIMP_PDB_CALLING_ERROR;
-
-  run_mode = (GimpRunMode) param[0].data.d_int32;
+	if (param[0].type!= GIMP_PDB_INT32) {
+		status=GIMP_PDB_CALLING_ERROR;
+	}
+	if (param[2].type!=GIMP_PDB_DRAWABLE) {
+		status=GIMP_PDB_CALLING_ERROR;
+	}
+	run_mode = (GimpRunMode) param[0].data.d_int32;
 	
 	pd.drawable = gimp_drawable_get(param[2].data.d_drawable);
 	gimp_drawable_mask_bounds(pd.drawable->drawable_id, &sel_x1, &sel_y1, &sel_x2, &sel_y2);
 	pd.selection_width = sel_x2 - sel_x1;
-  pd.selection_height = sel_y2 - sel_y1;
-  pd.selection_offset_x = sel_x1;
-  pd.selection_offset_y = sel_y1;
-  pd.image_width = gimp_drawable_width(pd.drawable->drawable_id);
-  pd.image_height = gimp_drawable_height(pd.drawable->drawable_id);
-  pd.channel_count = gimp_drawable_bpp(pd.drawable->drawable_id);
+	pd.selection_height = sel_y2 - sel_y1;
+	pd.selection_offset_x = sel_x1;
+	pd.selection_offset_y = sel_y1;
+	pd.image_width = gimp_drawable_width(pd.drawable->drawable_id);
+	pd.image_height = gimp_drawable_height(pd.drawable->drawable_id);
+	pd.channel_count = gimp_drawable_bpp(pd.drawable->drawable_id);
 
-  pd.point_grabbed = -1;
+	pd.point_grabbed = -1;
 
-	if (run_mode == GIMP_RUN_INTERACTIVE)
-	{
+	if (run_mode == GIMP_RUN_INTERACTIVE) {
 		// Interactive call with dialog
 		dialog(&pd);
-		if (pd.curve_user.count > 0)
-		{
+		if (pd.curve_user.count > 0) {
 			gimp_set_data (PLUG_IN_BINARY, pd.curve_user.user_points, sizeof (GdkPoint) * pd.curve_user.count);
 		}
-	}
-	else if (run_mode == GIMP_RUN_WITH_LAST_VALS)
-	{
+	} else if (run_mode == GIMP_RUN_WITH_LAST_VALS) {
 		// Read a saved curve and apply it
 		fft_prepare(&pd);
 		gimp_get_data(PLUG_IN_BINARY, pd.curve_user.user_points);
@@ -875,12 +809,10 @@ run (const gchar *name, gint nparams, const GimpParam *param, gint *nreturn_vals
 		gimp_drawable_update(pd.drawable->drawable_id, pd.selection_offset_x, pd.selection_offset_y, pd.selection_width, pd.selection_height);
 		fft_destroy(&pd);
 		gimp_displays_flush();
+	} else {
+		status = GIMP_PDB_CALLING_ERROR;  
 	}
-	else
-	{
-	  status = GIMP_PDB_CALLING_ERROR;	
-	}
-  values[0].type = GIMP_PDB_STATUS;
-  values[0].data.d_status = status;
-  gimp_drawable_detach(pd.drawable);
+	values[0].type = GIMP_PDB_STATUS;
+	values[0].data.d_status = status;
+	gimp_drawable_detach(pd.drawable);
 }
