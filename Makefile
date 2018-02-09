@@ -1,19 +1,17 @@
 #  Use gimptool-2.0 to sett these variables
-GIMPTOOL=gimptool-2.0
-PLUGIN_INSTALL=$(GIMPTOOL) --install-bin
-GCC=g++
-LIBS=$(shell pkg-config fftw3f gimp-2.0 gimpui-2.0 gtk+-2.0 --libs)
-CFLAGS=-O2 -g $(shell pkg-config fftw3f gimp-2.0 gimpui-2.0 gtk+-2.0 --cflags)
+GIMPTOOL = gimptool-2.0
+PLUGIN_INSTALL = $(GIMPTOOL) --install-bin
+GCC = gcc
+LIBS = $(shell pkg-config fftw3f gimp-2.0 gimpui-2.0 gtk+-2.0 --libs) -lm
+CFLAGS = -std=c99 -O2 $(shell pkg-config fftw3f gimp-2.0 gimpui-2.0 gtk+-2.0 --cflags)
 
-all: gimp-test
+all: convolution
 
-# Use of pkg-config is the recommended way
-gimp-test: plugin.c
-	$(GCC) $(CFLAGS) $(LIBS) -o gimp-test plugin.c  
+convolution: plugin.c
+	$(GCC) $(CFLAGS) -o $@ $^ $(LIBS)
 
-# To avoid gimptool use, just copy the fourier in the directory you want
-install: gimp-test
-	$(PLUGIN_INSTALL) gimp-test
+install: convolution
+	$(PLUGIN_INSTALL) $^
 	 
 clean:
 	rm -f gimp-test
